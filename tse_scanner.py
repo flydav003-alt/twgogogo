@@ -350,45 +350,109 @@ def parse_inst(raw):
         return sub.groupby('date')['net'].sum()
     return net_s(['Foreign_Investor','外資']), net_s(['Investment_Trust','投信'])
 
+def _fetch_inst_raw(sid, token, dataset):
+    """單檔籌碼抓取，回傳 raw DataFrame 或 None"""
+    try:
+        r = requests.get(
+            'https://api.finmindtrade.com/api/v4/data',
+            params={'dataset': dataset, 'data_id': sid,
+                    'start_date': START_DATE, 'end_date': END_DATE,
+                    'token': token}, timeout=20)
+        rj = r.json()
+        if rj.get('status') == 200 and rj.get('data'):
+            return pd.DataFrame(rj['data'])
+        # 限速警告
+        msg = str(rj.get('msg', ''))
+        if 'request' in msg.lower() or 'limit' in msg.lower():
+            return 'RATE_LIMIT'
+        return None
+    except Exception as e:
+        log_error(f'{sid} 籌碼({dataset})：{e}')
+        return None
+
+def _detect_inst_dataset(token, sample_id):
+    """
+    自動偵測哪個 dataset 有資料：
+    優先用 TaiwanStockInstitutionalInvestorsBuySell（新版）
+    fallback 到 TaiwanStockInstitutionalInvestors（舊版）
+    """
+    for ds in ['TaiwanStockInstitutionalInvestorsBuySell',
+               'TaiwanStockInstitutionalInvestors']:
+        result = _fetch_inst_raw(sample_id, token, ds)
+        if result is not None and result != 'RATE_LIMIT' and not result.empty:
+            print(f'  [籌碼偵測] ✅ 使用 dataset：{ds}（欄位：{list(result.columns[:6])}）')
+            return ds
+    print(f'  [籌碼偵測] ⚠️  兩個 dataset 均無資料，以空值繼續')
+    return 'TaiwanStockInstitutionalInvestorsBuySell'
+
+def parse_inst(raw):
+    if raw is None or raw.empty or 'name' not in raw.columns:
+        return None, None
+    df = raw.sort_values('date').copy()
+
+    # ── 自動偵測買賣欄位（新版叫 buy/sell，舊版也叫 buy/sell，但有時是 Buy/Sell）──
+    buy_col  = next((c for c in ['buy',  'Buy',  'buy_amount']  if c in df.columns), None)
+    sell_col = next((c for c in ['sell', 'Sell', 'sell_amount'] if c in df.columns), None)
+    if buy_col is None or sell_col is None:
+        log_error(f'parse_inst 找不到 buy/sell 欄位，現有欄位：{list(df.columns)}')
+        return None, None
+
+    def net_s(kws):
+        pat = '|'.join(kws)
+        sub = df[df['name'].str.contains(pat, na=False)].copy()
+        if sub.empty:
+            return pd.Series(dtype=float)
+        sub['net'] = (pd.to_numeric(sub[buy_col],  errors='coerce').fillna(0) -
+                      pd.to_numeric(sub[sell_col], errors='coerce').fillna(0))
+        return sub.groupby('date')['net'].sum()
+
+    return net_s(['Foreign_Investor', '外資']), net_s(['Investment_Trust', '投信'])
+
 def fetch_all_inst(valid_ids, token):
     EMPTY = {'foreign_consec':0,'trust_consec':0,'foreign_today':0.0,'trust_today':0.0,
              'foreign_3d':0.0,'trust_3d':0.0}
     inst_data = {sid: dict(EMPTY) for sid in valid_ids}
     total   = len(valid_ids)
     batches = (total - 1) // BATCH_SIZE + 1
+
+    # ── 自動偵測 dataset（用第一檔測試）──
+    inst_dataset = _detect_inst_dataset(token, valid_ids[0])
+
     print(f'\n[籌碼抓取] {total} 檔（Token: ...{token[-6:]}）')
+    rate_limit_count = 0
     for i in range(0, total, BATCH_SIZE):
         batch    = valid_ids[i:i+BATCH_SIZE]
         batch_no = i // BATCH_SIZE + 1
         print(f'  批次 {batch_no}/{batches}...', end=' ', flush=True)
         ok = 0
         for sid in batch:
-            try:
-                r = requests.get(
-                    'https://api.finmindtrade.com/api/v4/data',
-                    params={'dataset':'TaiwanStockInstitutionalInvestors',
-                            'data_id':sid,'start_date':START_DATE,
-                            'end_date':END_DATE,'token':token}, timeout=20)
-                rj = r.json()
-                raw = pd.DataFrame(rj['data']) if rj.get('status')==200 and rj.get('data') else None
-                if raw is None or raw.empty:
-                    continue
-                f_net, t_net = parse_inst(raw)
-                inst_data[sid] = {
-                    'foreign_consec': consec_buy_days(f_net),
-                    'trust_consec':   consec_buy_days(t_net),
-                    'foreign_today':  float(f_net.iloc[-1]) if f_net is not None and len(f_net)>0 else 0.0,
-                    'trust_today':    float(t_net.iloc[-1]) if t_net is not None and len(t_net)>0 else 0.0,
-                    'foreign_3d':     float(f_net.iloc[-3:].sum()) if f_net is not None and len(f_net)>=3 else 0.0,
-                    'trust_3d':       float(t_net.iloc[-3:].sum()) if t_net is not None and len(t_net)>=3 else 0.0,
-                }
-                ok += 1
-            except Exception as e:
-                log_error(f'{sid} 籌碼：{e}')
+            raw = _fetch_inst_raw(sid, token, inst_dataset)
+            if raw == 'RATE_LIMIT':
+                rate_limit_count += 1
+                if rate_limit_count <= 3:
+                    print(f'\n  ⚠️  Token 限速，等待 5 秒...', end=' ', flush=True)
+                time.sleep(5)
+                raw = _fetch_inst_raw(sid, token, inst_dataset)  # 重試一次
+            if raw is None or raw == 'RATE_LIMIT' or raw.empty:
+                continue
+            f_net, t_net = parse_inst(raw)
+            if f_net is None and t_net is None:
+                continue
+            inst_data[sid] = {
+                'foreign_consec': consec_buy_days(f_net),
+                'trust_consec':   consec_buy_days(t_net),
+                'foreign_today':  float(f_net.iloc[-1]) if f_net is not None and len(f_net)>0 else 0.0,
+                'trust_today':    float(t_net.iloc[-1]) if t_net is not None and len(t_net)>0 else 0.0,
+                'foreign_3d':     float(f_net.iloc[-3:].sum()) if f_net is not None and len(f_net)>=3 else 0.0,
+                'trust_3d':       float(t_net.iloc[-3:].sum()) if t_net is not None and len(t_net)>=3 else 0.0,
+            }
+            ok += 1
         print(f'OK {ok}/{len(batch)}')
         if i + BATCH_SIZE < total:
             time.sleep(BATCH_DELAY)
-    print('✅ 籌碼完成')
+    total_ok = sum(1 for v in inst_data.values() if v.get('foreign_consec',0)+v.get('trust_consec',0) > 0
+                   or v.get('foreign_today',0) != 0 or v.get('trust_today',0) != 0)
+    print(f'✅ 籌碼完成  有效資料 {total_ok} / {total} 檔')
     return inst_data
 
 # ============================================================
@@ -396,32 +460,66 @@ def fetch_all_inst(valid_ids, token):
 # ============================================================
 
 def calc_yoy_revenue(sid, token):
-    try:
-        r = requests.get(
-            'https://api.finmindtrade.com/api/v4/data',
-            params={'dataset':'TaiwanStockMonthRevenue','data_id':sid,
-                    'start_date':(TODAY - timedelta(days=400)).strftime('%Y-%m-%d'),
-                    'end_date':END_DATE,'token':token}, timeout=20)
-        rj = r.json()
-        rev_df = pd.DataFrame(rj['data']) if rj.get('status')==200 and rj.get('data') else None
-        if rev_df is None or rev_df.empty:
+    """
+    抓月營收 YoY。策略：
+    1. 先抓最新一期（days=500 確保有 13 個月）
+    2. 若最新期無資料，往前找最近有資料的那期（最多退 2 期）
+    3. 限速時 retry 最多 3 次，每次等待遞增
+    """
+    for attempt in range(3):
+        try:
+            r = requests.get(
+                'https://api.finmindtrade.com/api/v4/data',
+                params={'dataset': 'TaiwanStockMonthRevenue', 'data_id': sid,
+                        'start_date': (TODAY - timedelta(days=500)).strftime('%Y-%m-%d'),
+                        'end_date': END_DATE, 'token': token}, timeout=25)
+            rj = r.json()
+
+            # ── 限速偵測 ──
+            msg = str(rj.get('msg', ''))
+            if 'request' in msg.lower() or 'limit' in msg.lower():
+                wait = (attempt + 1) * 4
+                log_error(f'{sid} 月營收限速 attempt{attempt+1}，等待 {wait}s')
+                time.sleep(wait)
+                continue
+
+            if not (rj.get('status') == 200 and rj.get('data')):
+                return None
+
+            rev_df = pd.DataFrame(rj['data'])
+            rev_col = next((c for c in ['revenue', 'Revenue', 'monthly_revenue']
+                            if c in rev_df.columns), None)
+            if rev_col is None or rev_df.empty:
+                return None
+
+            rev_df = rev_df.sort_values('date').reset_index(drop=True)
+            rev_df[rev_col] = pd.to_numeric(rev_df[rev_col], errors='coerce')
+            rev_df = rev_df.dropna(subset=[rev_col])
+            rev_df = rev_df[rev_df[rev_col] > 0].reset_index(drop=True)
+
+            if len(rev_df) < 13:
+                return None
+
+            # ── 找最近有效期（最多往前 2 期，相容月底前還未公告的情況）──
+            for offset in [0, 1, 2]:
+                idx_latest = len(rev_df) - 1 - offset
+                idx_prev   = idx_latest - 12
+                if idx_prev < 0:
+                    continue
+                latest_rev = rev_df[rev_col].iloc[idx_latest]
+                prev_rev   = rev_df[rev_col].iloc[idx_prev]
+                if prev_rev > 0 and latest_rev > 0:
+                    yoy = round((latest_rev - prev_rev) / prev_rev * 100, 1)
+                    if offset > 0:
+                        log_error(f'{sid} 月營收：使用前 {offset} 期（{rev_df["date"].iloc[idx_latest]}）')
+                    return yoy
+
             return None
-        rev_df = rev_df.sort_values('date').reset_index(drop=True)
-        rev_col = next((c for c in ['revenue','Revenue','monthly_revenue'] if c in rev_df.columns), None)
-        if rev_col is None:
-            return None
-        rev_df[rev_col] = pd.to_numeric(rev_df[rev_col], errors='coerce')
-        rev_df = rev_df.dropna(subset=[rev_col])
-        if len(rev_df) < 13:
-            return None
-        latest_rev = rev_df[rev_col].iloc[-1]
-        prev_rev   = rev_df[rev_col].iloc[-13]
-        if prev_rev <= 0 or np.isnan(prev_rev):
-            return None
-        return round((latest_rev - prev_rev) / abs(prev_rev) * 100, 1)
-    except Exception as e:
-        log_error(f'{sid} 月營收YoY：{e}')
-        return None
+
+        except Exception as e:
+            log_error(f'{sid} 月營收 attempt{attempt+1}：{e}')
+            time.sleep(2)
+    return None
 
 def fetch_all_revenue(valid_ids, token):
     fin_data = {}
@@ -440,7 +538,7 @@ def fetch_all_revenue(valid_ids, token):
             else: fail += 1
         print(f'有YoY {ok} / 無資料 {fail}')
         if i + BATCH_SIZE < total:
-            time.sleep(BATCH_DELAY)
+            time.sleep(2.5)   # 從 1.5 → 2.5，避免 Token3 限速
     print(f'✅ 月營收完成  有YoY {sum(1 for v in fin_data.values() if v is not None)} / {total} 檔')
     return fin_data
 
@@ -582,8 +680,11 @@ def run_strong_filter(price_data, inst_data, fin_data, name_map):
         if c.get('rsi14',0) > 78:             c['total_score'] -= 8
         c['total_score'] = round(max(c['total_score'], 0), 2)
 
-    strong_df = (pd.DataFrame(candidates).sort_values('total_score', ascending=False).reset_index(drop=True))
-    if not strong_df.empty:
+    if not candidates:
+        print('⚠️  強勢確認股：無候選（請確認籌碼資料是否正常）')
+        strong_df = pd.DataFrame()
+    else:
+        strong_df = (pd.DataFrame(candidates).sort_values('total_score', ascending=False).reset_index(drop=True))
         strong_df.insert(0, 'rank', range(1, len(strong_df)+1))
     print(f'\n【強勢確認股漏斗】')
     base = funnel['總有效'] or 1

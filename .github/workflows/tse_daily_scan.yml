@@ -11,11 +11,19 @@ jobs:
     steps:
       - name: 取出程式碼
         uses: actions/checkout@v4
+
+      - name: 安裝中文字型
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q fonts-noto-cjk
+          fc-cache -fv
+
       - name: 設定 Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
+
       - name: 安裝 Python 套件
         run: |
           pip install --upgrade pip
@@ -24,7 +32,6 @@ jobs:
       - name: 執行上市選股系統
         env:
           FINMIND_TOKEN_1:  ${{ secrets.FINMIND_TOKEN_1 }}
-          FINMIND_TOKEN_2:  ${{ secrets.FINMIND_TOKEN_2 }}
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GMAIL_USER:       ${{ secrets.GMAIL_USER }}
@@ -33,13 +40,29 @@ jobs:
           REPORT_URL:       ${{ secrets.REPORT_URL }}
           TSE_CSV_PATH:     stock_list.csv
         run: python tse_scanner.py
-      - name: 推送
+
+      - name: 推送輸出檔到倉庫
         run: |
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          mkdir -p output
+          mkdir -p output docs
+
+          # 把 HTML 複製為 index.html（GitHub Pages 讀這裡）
+          NEW_HTML=$(ls output/TSE_report_*.html 2>/dev/null | head -1)
+          if [ -n "$NEW_HTML" ]; then
+            cp "$NEW_HTML" output/index.html
+            cp "$NEW_HTML" docs/index.html
+          fi
+
+          # 清掉舊檔
           git rm -f output/Twgogogo_*.csv 2>/dev/null || true
-          LATEST=$(ls output/Twgogogo_*.csv 2>/dev/null | head -1)
-          [ -n "$LATEST" ] && git add "$LATEST"
-          git diff --cached --quiet || git commit -m "Update: 上市選股 $(date +'%Y-%m-%d')"
+          git rm -f output/TSE_report_*.html 2>/dev/null || true
+
+          # 加入最新檔
+          LATEST_CSV=$(ls output/Twgogogo_*.csv 2>/dev/null | head -1)
+          [ -n "$LATEST_CSV" ] && git add "$LATEST_CSV"
+
+          git add output/index.html docs/index.html 2>/dev/null || true
+
+          git diff --cached --quiet || git commit -m "Update: 上市選股報告 $(date +'%Y-%m-%d')"
           git push

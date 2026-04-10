@@ -235,65 +235,124 @@ def fetch_all_revenue(ids,token):
 # ════════════════════════════════════════
 # Phase 2: 籌碼（★ 小批次 + 重試）
 # ════════════════════════════════════════
-def parse_inst(raw):
-    if raw is None or raw.empty or 'name' not in raw.columns: return None,None
-    df=raw.sort_values('date').copy()
-    def ns(kws):
-        pat='|'.join(kws)
-        sub=df[df['name'].str.contains(pat,na=False)].copy()
-        if sub.empty: return pd.Series(dtype=float)
-        sub['net']=(pd.to_numeric(sub['buy'],errors='coerce').fillna(0)-
-                    pd.to_numeric(sub['sell'],errors='coerce').fillna(0))
-        return sub.groupby('date')['net'].sum()
-    return ns(['Foreign_Investor','外資']),ns(['Investment_Trust','投信'])
+def _to_int(x):
+    try:
+        s=str(x).replace(',', '').replace('+', '').replace(' ', '').replace('－', '-').strip()
+        return int(s) if s and s != '--' else 0
+    except Exception:
+        return 0
 
-def fetch_inst_single(sid,token,attempt=1):
-    raw=fm_rest('TaiwanStockInstitutionalInvestors',sid,token)
-    if raw is not None and not raw.empty: return raw
-    if attempt<=RETRY_INST:
-        print(f'↻',end='',flush=True)
-        time.sleep(RETRY_WAIT)
-        return fetch_inst_single(sid,token,attempt+1)
-    return None
 
-def fetch_all_inst(ids,token):
-    EMPTY={'foreign_consec':0,'trust_consec':0,'foreign_today':0.0,
-           'trust_today':0.0,'foreign_3d':0.0,'trust_3d':0.0}
-    inst={s:dict(EMPTY) for s in ids}
-    t=len(ids); bs=(t-1)//BATCH_INST+1
-    print(f'\n[籌碼] {t} 檔 每批{BATCH_INST} 間隔{DELAY_INST}s 重試{RETRY_INST}次')
-    print(f'  Token: ...{token[-6:]}  預估 {bs*DELAY_INST/60:.1f} 分鐘')
-    tok=0; tfail=0; cfail=0
-    for i in range(0,t,BATCH_INST):
-        b=ids[i:i+BATCH_INST]; bn=i//BATCH_INST+1
-        print(f'  {bn}/{bs}（{i+1}~{i+len(b)}）',end=' ',flush=True)
-        bok=0
-        for s in b:
-            raw=fetch_inst_single(s,token)
-            if raw is None or raw.empty:
-                tfail+=1; cfail+=1
-                if cfail>=5:
-                    print(f'\n  ⚠️ 連續失敗{cfail}次 等{RETRY_WAIT}s',end=' ')
-                    time.sleep(RETRY_WAIT); cfail=0
-                continue
-            cfail=0
-            try:
-                fn,tn=parse_inst(raw)
-                inst[s]={
-                    'foreign_consec':consec_buy_days(fn),'trust_consec':consec_buy_days(tn),
-                    'foreign_today':float(fn.iloc[-1]) if fn is not None and len(fn)>0 else 0.0,
-                    'trust_today':float(tn.iloc[-1]) if tn is not None and len(tn)>0 else 0.0,
-                    'foreign_3d':float(fn.iloc[-3:].sum()) if fn is not None and len(fn)>=3 else 0.0,
-                    'trust_3d':float(tn.iloc[-3:].sum()) if tn is not None and len(tn)>=3 else 0.0,
-                }; bok+=1
-            except Exception as e: log_error(f'{s} 籌碼解析：{e}'); tfail+=1
-        tok+=bok; print(f'OK {bok}/{len(b)} 累計{tok}')
-        if i+BATCH_INST<t: time.sleep(DELAY_INST)
-    print(f'✅ 籌碼 成功{tok} 失敗{tfail} 共{t}'); return inst
+def _fetch_t86_one_day(date_str):
+    """
+    抓單日全市場三大法人（T86 ALLBUT0999）。
+    T86 欄位（0-based index）：
+      [0]  股票代號
+      [4]  外資及陸資買賣超（千股 = 張）
+      [13] 投信買賣超（千股 = 張）
+    回傳 DataFrame(stock_id, foreign_net, trust_net) 或空 DataFrame。
+    """
+    url = ('https://www.twse.com.tw/rwd/zh/fund/T86'
+           f'?date={date_str}&selectType=ALLBUT0999&response=json')
+    try:
+        r = requests.get(url, timeout=25,
+                         headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                                                'AppleWebKit/537.36 Chrome/120.0'})
+        j = r.json()
+        data = next((j[k] for k in ['data', 'data9', 'data0'] if k in j and j[k]), None)
+        if not data:
+            return pd.DataFrame()
 
-# ════════════════════════════════════════
-# 篩選模組
-# ════════════════════════════════════════
+        df = pd.DataFrame(data)
+        ncol = len(df.columns)
+        if ncol < 13:
+            return pd.DataFrame()
+        df.columns = list(range(ncol))
+
+        trust_col = 13 if ncol >= 24 else (10 if ncol >= 11 else 7)
+
+        result = pd.DataFrame({
+            'stock_id': df[0].astype(str).str.strip().str.zfill(4),
+            'foreign_net': df[4].apply(_to_int),
+            'trust_net': df[trust_col].apply(_to_int),
+        })
+        return (result[result['stock_id'].str.match(r'^\d{4}$')]
+                .reset_index(drop=True))
+    except Exception as e:
+        log_error(f'T86 {date_str}：{e}')
+        return pd.DataFrame()
+
+
+def _recent_trade_dates(n_days=30, max_back_days=120):
+    ds = []
+    d = datetime.today()
+    checked = 0
+    while len(ds) < n_days and checked < max_back_days:
+        s = d.strftime('%Y%m%d')
+        if not _fetch_t86_one_day(s).empty:
+            ds.append(s)
+        d -= timedelta(days=1)
+        checked += 1
+        time.sleep(0.2)
+    return sorted(ds)
+
+
+def fetch_all_inst(ids, token):
+    """
+    籌碼抓取：改用 TWSE T86 全市場資料。
+    token 參數保留但不使用，維持介面相容。
+    """
+    EMPTY = {'foreign_consec': 0, 'trust_consec': 0,
+             'foreign_today': 0.0, 'trust_today': 0.0,
+             'foreign_3d': 0.0, 'trust_3d': 0.0}
+    inst = {s: dict(EMPTY) for s in ids}
+
+    trade_dates = _recent_trade_dates(30, 120)
+    print(f'\n[籌碼抓取] TWSE T86 模式（{len(trade_dates)} 天 × 全市場，不耗 Token）')
+    if not trade_dates:
+        print('  ⚠️  T86 無資料，籌碼欄位維持 0')
+        return inst
+
+    daily_inst = {}
+    for i, dt in enumerate(trade_dates, 1):
+        df_d = _fetch_t86_one_day(dt)
+        if not df_d.empty:
+            daily_inst[dt] = df_d
+        if i % 10 == 0 or i == len(trade_dates):
+            print(f'  已抓 {i}/{len(trade_dates)} 天  有效 {len(daily_inst)} 天', flush=True)
+        time.sleep(0.25)
+
+    if not daily_inst:
+        print('  ⚠️  T86 全部無資料，籌碼欄位維持 0')
+        return inst
+
+    sorted_dates = sorted(daily_inst.keys())
+    print(f'  T86 資料範圍：{sorted_dates[0]} → {sorted_dates[-1]}')
+
+    for sid in ids:
+        fvals = []
+        tvals = []
+        for dt in sorted_dates:
+            ddf = daily_inst[dt]
+            hit = ddf[ddf['stock_id'] == sid]
+            if hit.empty:
+                fvals.append(0)
+                tvals.append(0)
+            else:
+                fvals.append(int(hit['foreign_net'].iloc[0]))
+                tvals.append(int(hit['trust_net'].iloc[0]))
+
+        inst[sid] = {
+            'foreign_consec': consec_buy_days(pd.Series(fvals)),
+            'trust_consec': consec_buy_days(pd.Series(tvals)),
+            'foreign_today': float(fvals[-1]) if fvals else 0.0,
+            'trust_today': float(tvals[-1]) if tvals else 0.0,
+            'foreign_3d': float(sum(fvals[-3:])) if fvals else 0.0,
+            'trust_3d': float(sum(tvals[-3:])) if tvals else 0.0,
+        }
+
+    print(f'  ✅ 籌碼完成：{len(ids)} 檔')
+    return inst
 def compute_limit_flag(df):
     if len(df)<A_LIMIT_DAYS: return False
     r=df.tail(A_LIMIT_DAYS)['daily_return'].fillna(0)

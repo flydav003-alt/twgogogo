@@ -1,9 +1,11 @@
 """
-台股GOGOGO 上市專用模型 v2.0 — 完整版（含 HTML 報告 + K線圖）
-Phase 0: TWSE OpenAPI pre-filter（成交額≥2.5億）
+台股GOGOGO 上市專用模型 v3.0 — 正式版
+計分規則 v3.0：量比下限1.5、60日過熱>40%+MA28>20%、YoY>15%加15分、量價×1.1
+配色：暗紫科技 + 橘金標題
+Phase 0: TWSE OpenAPI pre-filter（≥2.5億）
 Phase 1: FinMind Token1 → 股價+營收
 Phase 2: TWSE T86 → 籌碼（免Token）
-輸出: output/Twgogogo_YYYYMMDD.csv + output/TSE_report_YYYYMMDD.html
+輸出: Twgogogo_YYYYMMDD.csv + TSE_report_YYYYMMDD.html
 """
 import subprocess,sys,os,time,warnings,json,smtplib,base64,io
 from email.mime.multipart import MIMEMultipart
@@ -24,9 +26,6 @@ import mplfinance as mpf
 warnings.filterwarnings('ignore')
 pd.set_option('display.max_columns',30)
 
-# ════════════════════════════════════════
-# 常數
-# ════════════════════════════════════════
 FINMIND_TOKEN_1=os.environ.get("FINMIND_TOKEN_1","") or os.environ.get("FINMIND_TOKEN","")
 TELEGRAM_TOKEN=os.environ.get("TELEGRAM_TOKEN","")
 TELEGRAM_CHAT_ID=os.environ.get("TELEGRAM_CHAT_ID","")
@@ -36,67 +35,63 @@ EMAIL_TO=os.environ.get("EMAIL_TO","")
 GITHUB_PAGES_URL=os.environ.get("REPORT_URL","")
 TSE_CSV_PATH=os.environ.get("TSE_CSV_PATH","stock_list.csv")
 
-PREFILTER_TURNOVER=250_000_000  # 2.5億
+# ═══ v3.0 計分常數 ═══
+PREFILTER_TURNOVER=250_000_000
 A_VOL_MA5_MIN=800; A_TURNOVER_MIN=250_000_000; A_PRICE_MIN=10
 A_LIMIT_DAYS=3; A_LIMIT_THRESHOLD=0.095
-B1_VOL_RATIO_MIN=1.3; B1_VOL_RATIO_MAX=4.0; B2_RETURN_MIN=0.01
+# ★ v3.0: 量比下限 1.3→1.5
+B1_VOL_RATIO_MIN=1.5; B1_VOL_RATIO_MAX=4.0; B2_RETURN_MIN=0.01
 B2_RETURN_MAX_PCT=9.0; B4_CLOSE_RATIO=0.65; B_PASS_COUNT=2
 C_CONSEC_DAYS_MIN=3; C_SINGLE_MIN=200
 D_RSI_MAX=78; D_RETURN_MAX=0.10
-W_VOL_RATIO=1.6; W_HIGH20=1.4; W_MA28_BIAS=1.0; W_INST_DAYS=3.0; W_RETURN_PCT=0.8
-EW_VOL_RATIO_MIN=1.3; EW_VOL_RATIO_MAX=4.0; EW_RETURN_MAX=9.0; EW_RETURN_MIN=-2.0
+# ★ v3.0: 量價係數調整（vol×1.8, h20×1.3, bias×1.1, ret×0.9），整體×1.1
+W_VOL_RATIO=1.8; W_HIGH20=1.3; W_MA28_BIAS=1.1; W_RETURN_PCT=0.9
+W_PRICE_BOOST=1.1  # ★ 量價子分數額外×1.1
+W_INST_DAYS=2.2    # 籌碼不乘1.1
+# ★ v3.0: 起漲量比也跟著改1.5
+EW_VOL_RATIO_MIN=1.5; EW_VOL_RATIO_MAX=4.0; EW_RETURN_MAX=9.0; EW_RETURN_MIN=-2.0
 EW_MA28_BIAS_MAX=25.0; EW_CONSOL_RATIO=1.12; EW_TURNOVER_MIN=250_000_000
 EW_ABOVE_MA20_MIN=0; EW_MAX20D_RET_MAX=20.0; EW_INST_MIN=80
-EW_PAST60D_MAX=45.0; EW_PAST60D_BIAS=25.0
-EW_BONUS_YOY=16.0; EW_BONUS_INST=24.0; EW_BONUS_60D=22.0
+# ★ v3.0: 60日過熱 45%→40%, MA28 25%→20%
+EW_PAST60D_MAX=40.0; EW_PAST60D_BIAS=20.0
+# ★ v3.0: YoY門檻 20%→15%, 加分 18→15
+EW_BONUS_YOY=15.0; EW_BONUS_YOY_THRESHOLD=15.0
+EW_BONUS_INST=24.0; EW_BONUS_60D=22.0
 COMPOSITE_EARLY_W=0.52; COMPOSITE_TOTAL_W=0.48; INST_CONSEC_WEIGHT=2.2
 MIN_DAYS=60; ERROR_LOG="error_log.txt"
 TOP_STRONG=10; TOP_EARLY=10; TOP_COMPOSITE=10; TOP_CHART=5
-
-BATCH_PRICE=40; DELAY_PRICE=1.5
-BATCH_REV=40; DELAY_REV=1.5
+BATCH_PRICE=40; DELAY_PRICE=1.5; BATCH_REV=40; DELAY_REV=1.5
 
 TODAY=datetime.today()
 END_DATE=TODAY.strftime('%Y-%m-%d')
 START_DATE=(TODAY-timedelta(days=400)).strftime('%Y-%m-%d')
 TODAY_STR=TODAY.strftime('%Y%m%d')
 TODAY_DISP=TODAY.strftime('%Y/%m/%d')
-print(f"[上市專用模型v2.0] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+print(f"[台股GOGOGO v3.0] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 print(f"[系統] {START_DATE} → {END_DATE}")
 
-# ════════════════════════════════════════
-# 字型
-# ════════════════════════════════════════
 def init_chinese_font():
     mpl.rcParams['axes.unicode_minus']=False
-    for p in ['/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
-              '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
-              '/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc',
-              '/usr/share/fonts/opentype/noto/NotoSansCJKtc-Regular.otf']:
+    for p in ['/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc','/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc','/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc']:
         if os.path.exists(p):
             try:
-                prop=fm.FontProperties(fname=p); name=prop.get_name()
-                mpl.rcParams['font.sans-serif']=[name,'DejaVu Sans']
-                fm.fontManager.addfont(p)
-                print(f'  ✅ 字型：{name}'); return p,prop
+                prop=fm.FontProperties(fname=p); n=prop.get_name()
+                mpl.rcParams['font.sans-serif']=[n,'DejaVu Sans']; fm.fontManager.addfont(p)
+                print(f'  ✅ 字型：{n}'); return p,prop
             except: pass
     print('  ⚠️ 無中文字型'); return None,None
 
-# ════════════════════════════════════════
-# 工具
-# ════════════════════════════════════════
 def log_error(msg):
-    with open(ERROR_LOG,'a',encoding='utf-8') as f:
-        f.write(f'[{datetime.now().strftime("%H:%M:%S")}] {msg}\n')
+    with open(ERROR_LOG,'a',encoding='utf-8') as f: f.write(f'[{datetime.now().strftime("%H:%M:%S")}] {msg}\n')
 
 def calc_rsi(s,p=14):
     d=s.diff(); g=d.clip(lower=0); l=(-d).clip(lower=0)
     ag=g.ewm(alpha=1/p,adjust=False).mean(); al=l.ewm(alpha=1/p,adjust=False).mean()
-    rs=ag/al.replace(0,np.nan); return 100-(100/(1+rs))
+    return 100-(100/(1+ag/al.replace(0,np.nan)))
 
 def calc_macd(s,f=12,sl=26,sg=9):
-    ef=s.ewm(span=f,adjust=False).mean(); es=s.ewm(span=sl,adjust=False).mean()
-    m=ef-es; return m-m.ewm(span=sg,adjust=False).mean()
+    m=s.ewm(span=f,adjust=False).mean()-s.ewm(span=sl,adjust=False).mean()
+    return m-m.ewm(span=sg,adjust=False).mean()
 
 def consec_buy_days(series):
     if series is None or len(series)==0: return 0
@@ -132,13 +127,10 @@ def calc_indicators(df):
     return df
 
 def fig_to_base64(fig):
-    buf=io.BytesIO()
-    fig.savefig(buf,format='png',dpi=120,bbox_inches='tight',facecolor='#0d1117')
+    buf=io.BytesIO(); fig.savefig(buf,format='png',dpi=120,bbox_inches='tight',facecolor='#0a0a12')
     buf.seek(0); return base64.b64encode(buf.read()).decode('utf-8')
 
-# ════════════════════════════════════════
-# Phase 0: TWSE pre-filter（2.5億）
-# ════════════════════════════════════════
+# ═══ Phase 0: TWSE pre-filter ═══
 def load_stock_list():
     df_csv=None
     for enc in ['utf-8-sig','utf-8','cp950','big5','latin1']:
@@ -153,7 +145,7 @@ def load_stock_list():
     return df_csv['stock_id'].tolist(), dict(zip(df_csv['stock_id'],df_csv['name']))
 
 def twse_prefilter(all_ids, name_map):
-    print(f'\n[Phase 0] TWSE pre-filter（≥{PREFILTER_TURNOVER/1e8:.1f}億 + ≥{A_PRICE_MIN}元）')
+    print(f'\n[Phase 0] TWSE pre-filter（≥{PREFILTER_TURNOVER/1e8:.1f}億）')
     hdr={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     twse_df=None
     try:
@@ -169,7 +161,7 @@ def twse_prefilter(all_ids, name_map):
     sc='Code' if 'Code' in twse_df.columns else twse_df.columns[0]
     tc=next((c for c in twse_df.columns if 'TradeValue' in str(c) or '成交金額' in str(c)),None)
     cc=next((c for c in twse_df.columns if 'ClosingPrice' in str(c) or '收盤' in str(c)),None)
-    if not tc or not cc: print('  ⚠️ 欄位缺失'); return all_ids
+    if not tc or not cc: return all_ids
     twse_df['sid']=twse_df[sc].astype(str).str.strip(); twse_df['tv']=twse_df[tc].apply(pn); twse_df['cp']=twse_df[cc].apply(pn)
     mt=twse_df[twse_df['sid'].isin(set(all_ids))]
     ps=mt[(mt['tv']>=PREFILTER_TURNOVER)&(mt['cp']>=A_PRICE_MIN)]
@@ -177,9 +169,7 @@ def twse_prefilter(all_ids, name_map):
     print(f'  匹配{len(mt)}→通過{len(fids)}（淘汰{len(mt)-len(fids)}）')
     return fids if len(fids)>=50 else all_ids
 
-# ════════════════════════════════════════
-# FinMind REST
-# ════════════════════════════════════════
+# ═══ FinMind REST ═══
 def fm_rest(dataset,sid,token,start=None,end=None):
     try:
         r=requests.get('https://api.finmindtrade.com/api/v4/data',
@@ -190,9 +180,7 @@ def fm_rest(dataset,sid,token,start=None,end=None):
         return None
     except Exception as e: log_error(f'{sid} {dataset}：{e}'); return None
 
-# ════════════════════════════════════════
-# Phase 1: 股價 + 營收
-# ════════════════════════════════════════
+# ═══ Phase 1: 股價+營收 ═══
 def fetch_all_prices(ids,token):
     pd_={}; t=len(ids); bs=(t-1)//BATCH_PRICE+1
     print(f'\n[K線] {t} 檔 {bs} 批')
@@ -230,9 +218,7 @@ def fetch_all_revenue(ids,token):
         if i+BATCH_REV<t: time.sleep(DELAY_REV)
     print(f'✅ 營收完成'); return fd
 
-# ════════════════════════════════════════
-# Phase 2: 籌碼 TWSE T86（免 Token）
-# ════════════════════════════════════════
+# ═══ Phase 2: 籌碼 TWSE T86 ═══
 def _to_int(x):
     try:
         s=str(x).replace(',','').replace('+','').replace(' ','').replace('－','-').strip()
@@ -256,8 +242,7 @@ def _fetch_t86_one_day(date_str):
 def fetch_all_inst(ids, token_unused):
     EMPTY={'foreign_consec':0,'trust_consec':0,'foreign_today':0.0,'trust_today':0.0,'foreign_3d':0.0,'trust_3d':0.0}
     inst={s:dict(EMPTY) for s in ids}
-    print(f'\n[籌碼] TWSE T86 模式（免Token）')
-    # 找最近30個交易日
+    print(f'\n[籌碼] TWSE T86（免Token）')
     trade_dates=[]; d=datetime.today(); checked=0
     while len(trade_dates)<30 and checked<60:
         s=d.strftime('%Y%m%d')
@@ -266,10 +251,10 @@ def fetch_all_inst(ids, token_unused):
             if not df_t.empty: trade_dates.append(s)
             time.sleep(0.3)
         d-=timedelta(days=1); checked+=1
-        if len(trade_dates)%5==0 and trade_dates: print(f'  已找 {len(trade_dates)} 天...',flush=True)
+        if len(trade_dates)%5==0 and trade_dates: print(f'  已找{len(trade_dates)}天...',flush=True)
     trade_dates=sorted(trade_dates)
     if not trade_dates: print('  ⚠️ T86無資料'); return inst
-    print(f'  T86 {len(trade_dates)} 天：{trade_dates[0]}→{trade_dates[-1]}')
+    print(f'  T86 {len(trade_dates)}天：{trade_dates[0]}→{trade_dates[-1]}')
     daily_inst={}
     for dt in trade_dates:
         df_d=_fetch_t86_one_day(dt)
@@ -287,9 +272,7 @@ def fetch_all_inst(ids, token_unused):
             'foreign_3d':float(sum(fv[-3:])) if fv else 0,'trust_3d':float(sum(tv[-3:])) if tv else 0}
     print(f'  ✅ 籌碼完成 {len(ids)} 檔'); return inst
 
-# ════════════════════════════════════════
-# 篩選模組
-# ════════════════════════════════════════
+# ═══ 篩選模組 ═══
 def compute_limit_flag(df):
     if len(df)<A_LIMIT_DAYS: return False
     r=df.tail(A_LIMIT_DAYS)['daily_return'].fillna(0)
@@ -321,9 +304,7 @@ def module_d(r):
         if mc<-0.5 and mc<mp: return False
     return True
 
-# ════════════════════════════════════════
-# 強勢 + 起漲
-# ════════════════════════════════════════
+# ═══ 強勢確認 ═══
 def run_strong_filter(pd_,inst,fin,nm):
     cands=[]
     for sid,df in pd_.items():
@@ -342,10 +323,14 @@ def run_strong_filter(pd_,inst,fin,nm):
         p60=0.0
         if len(df)>=61: c60=df['close'].iloc[-61]; p60=((last['close']-c60)/c60*100) if c60>0 else 0
         if p60>EW_PAST60D_MAX and mb>EW_PAST60D_BIAS: continue
-        info=inst.get(sid,{}); ic=info.get('foreign_consec',0)+info.get('trust_consec',0)
-        icw=ic*INST_CONSEC_WEIGHT; dp=last.get('daily_return',0)*100
+        info=inst.get(sid,{})
+        ic=info.get('foreign_consec',0)+info.get('trust_consec',0)
+        dp=last.get('daily_return',0)*100
         h20=1.0 if last['close']>=(last.get('high20') or 1e9) else 0.0
-        sc=last['vol_ratio']*W_VOL_RATIO+h20*W_HIGH20+mb*W_MA28_BIAS+icw*W_INST_DAYS+dp*W_RETURN_PCT
+        # ★ v3.0: 量價子分數 ×1.1，籌碼不乘
+        price_sub = (last['vol_ratio']*W_VOL_RATIO + h20*W_HIGH20 + mb*W_MA28_BIAS + dp*W_RETURN_PCT) * W_PRICE_BOOST
+        inst_sub = ic * INST_CONSEC_WEIGHT * W_INST_DAYS  # 不乘1.1
+        sc = price_sub + inst_sub
         cands.append({'stock_id':sid,'name':nm.get(sid,sid),'score':round(sc,2),
             'close':last['close'],'turnover_today':last.get('turnover_today',0),
             'vol_ratio':round(last['vol_ratio'],2),'ma28_bias':round(mb,2),'daily_return_pct':round(dp,2),
@@ -355,14 +340,14 @@ def run_strong_filter(pd_,inst,fin,nm):
             'yoy_revenue_pct':fin.get(sid,None),'past_60d_cum':round(p60,1),
             'signal_b':' + '.join(bsig),'signal_c':' + '.join(csig),
             'strength':'強' if sc>18 else('中' if sc>=12 else '弱'),
-            '_vr':last['vol_ratio'],'_mb':mb,'_ic':float(icw),'_dp':dp,'_h20':h20})
+            '_vr':last['vol_ratio'],'_mb':mb,'_ic':float(ic*INST_CONSEC_WEIGHT),'_dp':dp,'_h20':h20})
     if len(cands)>=2:
         vz=safe_zscore([c['_vr'] for c in cands]); mz=safe_zscore([c['_mb'] for c in cands])
         iz=safe_zscore([c['_ic'] for c in cands]); dz=safe_zscore([c['_dp'] for c in cands])
         hz=safe_zscore([c['_h20'] for c in cands])
-        ws=W_VOL_RATIO+W_HIGH20+W_MA28_BIAS+W_INST_DAYS+W_RETURN_PCT
+        ws=W_VOL_RATIO+W_HIGH20+W_MA28_BIAS+W_RETURN_PCT+W_INST_DAYS
         for i,c in enumerate(cands):
-            z=W_VOL_RATIO/ws*vz[i]+W_HIGH20/ws*mz[i]+W_MA28_BIAS/ws*iz[i]+W_INST_DAYS/ws*dz[i]+W_RETURN_PCT/ws*hz[i]
+            z=W_VOL_RATIO/ws*vz[i]+W_HIGH20/ws*mz[i]+W_MA28_BIAS/ws*iz[i]+W_RETURN_PCT/ws*dz[i]+W_INST_DAYS/ws*hz[i]
             c['total_score']=round(c['score']+float(z),2)
     else:
         for c in cands: c['total_score']=c['score']
@@ -376,6 +361,7 @@ def run_strong_filter(pd_,inst,fin,nm):
     if not sdf.empty: sdf.insert(0,'rank',range(1,len(sdf)+1))
     print(f'\n【強勢確認】{len(cands)} 檔'); return sdf,cands
 
+# ═══ 起漲預警 ═══
 def run_early_filter(pd_,inst,fin,nm):
     cands=[]
     for sid,df in pd_.items():
@@ -400,10 +386,11 @@ def run_early_filter(pd_,inst,fin,nm):
         ftn=ft/1000 if abs(ft)>1e6 else ft; yoy=fin.get(sid,None)
         ew=0.35*(vr*15)+0.30*(max(0,(1.20-cons))*14)+0.35*((1 if ic>=2 or ftn>=80 else 0)*18)
         bt=8.0
+        # ★ v3.0: YoY門檻15%加15分
         if yoy is not None and not pd.isna(yoy):
             yv=float(yoy)
             if yv>80: bt+=EW_BONUS_YOY
-            elif yv>30: bt+=EW_BONUS_YOY*0.7
+            elif yv>EW_BONUS_YOY_THRESHOLD: bt+=EW_BONUS_YOY*0.7
             else: bt+=EW_BONUS_YOY*0.4
         if ic>=2 or ftn>80: bt+=EW_BONUS_INST
         if p60<25: bt+=EW_BONUS_60D
@@ -423,9 +410,7 @@ def run_early_filter(pd_,inst,fin,nm):
     else: edf=pd.DataFrame()
     print(f'【起漲預警】{len(cands)} 檔'); return edf,cands
 
-# ════════════════════════════════════════
-# K線圖
-# ════════════════════════════════════════
+# ═══ K線圖 ═══
 def draw_kline(sid,price_data,name_map,font_path,label=''):
     df_p=price_data.get(sid)
     if df_p is None or len(df_p)<30: return None
@@ -452,9 +437,7 @@ def draw_kline(sid,price_data,name_map,font_path,label=''):
         b64=fig_to_base64(fig); plt.close(fig); return b64
     except Exception as e: log_error(f'{sid} K線圖：{e}'); return None
 
-# ════════════════════════════════════════
-# CSV
-# ════════════════════════════════════════
+# ═══ CSV ═══
 def export_csv(pd_,inst,fin,nm,sdf,edf):
     ss=set(sdf['stock_id'].tolist()) if not sdf.empty else set()
     es=set(edf['stock_id'].tolist()) if not edf.empty else set()
@@ -497,9 +480,7 @@ def export_csv(pd_,inst,fin,nm,sdf,edf):
     full.to_csv(fn,index=False,encoding='utf-8-sig')
     print(f'\n✅ {fn}（{len(full)} 筆）'); return fn,full
 
-# ════════════════════════════════════════
-# HTML 報告
-# ════════════════════════════════════════
+# ═══ HTML 報告（暗紫科技 + 橘金標題）═══
 def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts,c_charts,full_out):
     def fn(v,d=2):
         try: return f'{float(v):,.{d}f}'
@@ -510,34 +491,28 @@ def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts
     def pc(v):
         try:
             f=float(v)
-            if f>=5: return f'<span style="color:#f85149;font-weight:700">{f:+.2f}%</span>'
-            if f>=1: return f'<span style="color:#e6a817">{f:+.2f}%</span>'
-            if f<=-3: return f'<span style="color:#3fb950">{f:+.2f}%</span>'
+            if f>=5: return f'<span style="color:#fb7185;font-weight:700">{f:+.2f}%</span>'
+            if f>=1: return f'<span style="color:#fbbf24">{f:+.2f}%</span>'
+            if f<=-3: return f'<span style="color:#34d399">{f:+.2f}%</span>'
             return f'{f:+.2f}%'
         except: return str(v)
     def rc(v):
         try:
             f=float(v)
-            if f>=78: return f'<span style="color:#f85149;font-weight:700">{f:.1f} ⚠️</span>'
-            if f>=65: return f'<span style="color:#e6a817">{f:.1f}</span>'
+            if f>=78: return f'<span style="color:#fb7185;font-weight:700">{f:.1f} ⚠️</span>'
+            if f>=65: return f'<span style="color:#fbbf24">{f:.1f}</span>'
             return f'{f:.1f}'
         except: return str(v)
     def fy(v):
         try:
             f=float(v)
-            if f>=20: return f'<span style="color:#3fb950;font-weight:700">+{f:.0f}%</span>'
-            if f>=0: return f'<span style="color:#e6a817">+{f:.0f}%</span>'
-            return f'<span style="color:#f85149">{f:.0f}%</span>'
-        except: return '<span style="color:#8b949e">-</span>'
+            if f>=20: return f'<span style="color:#34d399;font-weight:700">+{f:.0f}%</span>'
+            if f>=0: return f'<span style="color:#fbbf24">+{f:.0f}%</span>'
+            return f'<span style="color:#fb7185">{f:.0f}%</span>'
+        except: return '<span style="color:#7c7894">-</span>'
     def sb(v):
-        c={'強':'#f85149','中':'#e6a817','弱':'#8b949e'}.get(v,'#8b949e')
+        c={'強':'#fb7185','中':'#c084fc','弱':'#7c7894'}.get(v,'#7c7894')
         return f'<span style="background:{c};color:#fff;padding:2px 10px;border-radius:12px;font-weight:700">{v}</span>'
-    def cb(v):
-        try:
-            f=float(v)
-            return f'<span style="background:linear-gradient(135deg,#1a2a3a,#2d4a6a);color:#fff;padding:3px 12px;border-radius:20px;font-weight:700">{f:.2f}</span>'
-        except: return '-'
-    # K線圖 HTML
     def build_chart_html(charts,df_ref,scol='total_score'):
         h=''
         for sid,b64 in charts.items():
@@ -551,103 +526,140 @@ def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts
         for _,r in sdf.head(TOP_STRONG).iterrows():
             rk=int(r['rank']); m=['🥇','🥈','🥉'][rk-1] if rk<=3 else f'#{rk}'
             yr=fin.get(r['stock_id'],None)
-            sr+=f'<tr><td style="text-align:center">{m}</td><td style="color:#e6a817;font-weight:700">{r["stock_id"]}</td><td>{r["name"]}</td>'
-            sr+=f'<td>{fn(r["total_score"])}</td><td style="font-size:.82em">{r.get("signal_b","")}<br><span style="color:#8b949e">{r.get("signal_c","")}</span></td>'
-            sr+=f'<td>{fn(r["close"],1)}</td><td>{ft(r["turnover_today"])}</td><td>{fn(r["vol_ratio"])}x</td>'
+            sr+=f'<tr><td style="text-align:center">{m}</td><td style="color:#fb7185;font-weight:700">{r["stock_id"]}</td><td style="font-weight:600">{r["name"]}</td>'
+            sr+=f'<td><span class="badge-score" style="background:linear-gradient(135deg,#3a1520,#6b2535)">{fn(r["total_score"])}</span></td>'
+            sr+=f'<td style="font-size:.82em">{r.get("signal_b","")}<br><span style="color:#7c7894">{r.get("signal_c","")}</span></td>'
+            sr+=f'<td style="font-weight:600">{fn(r["close"],1)}</td><td>{ft(r["turnover_today"])}</td><td>{fn(r["vol_ratio"])}x</td>'
             sr+=f'<td>{pc(r["ma28_bias"])}</td><td>{pc(r["daily_return_pct"])}</td><td>{rc(r["rsi14"])}</td>'
             sr+=f'<td>{r["inst_consec"]}天</td><td>{sb(r["strength"])}</td><td>{fy(yr)}</td></tr>'
-    else: sr='<tr><td colspan="14" style="text-align:center;color:#8b949e;padding:24px">今日無符合條件個股</td></tr>'
+    else: sr='<tr><td colspan="14" style="text-align:center;color:#7c7894;padding:24px">今日無符合條件個股</td></tr>'
     # 起漲表格
     er=''
     if not edf.empty:
         for _,r in edf.head(TOP_EARLY).iterrows():
             rk=int(r['rank']); m=['🌱','🌿','🍃'][rk-1] if rk<=3 else f'#{rk}'
-            er+=f'<tr><td style="text-align:center">{m}</td><td style="color:#3fb950;font-weight:700">{r["stock_id"]}</td><td>{r["name"]}</td>'
-            er+=f'<td>{fn(r["total_ew_score"])}</td><td>{fn(r["close"],1)}</td><td>{ft(r["turnover_today"])}</td>'
-            er+=f'<td>{fn(r["vol_ratio"])}x</td><td>{pc(r["ma28_bias"])}</td><td>{pc(r["daily_return_pct"])}</td>'
-            er+=f'<td>{rc(r["rsi14"])}</td><td>{fn(r["consol_ratio"])}</td><td>{fy(r["yoy_revenue_pct"])}</td>'
-            er+=f'<td>{r["inst_consec_days"]}天</td></tr>'
-    else: er='<tr><td colspan="13" style="text-align:center;color:#8b949e;padding:24px">今日無起漲預警</td></tr>'
+            er+=f'<tr><td style="text-align:center">{m}</td><td style="color:#2dd4bf;font-weight:700">{r["stock_id"]}</td><td>{r["name"]}</td>'
+            er+=f'<td><span class="badge-score" style="background:linear-gradient(135deg,#0a2520,#1a5545)">{fn(r["total_ew_score"])}</span></td>'
+            er+=f'<td>{fn(r["close"],1)}</td><td>{ft(r["turnover_today"])}</td><td>{fn(r["vol_ratio"])}x</td>'
+            er+=f'<td>{pc(r["ma28_bias"])}</td><td>{pc(r["daily_return_pct"])}</td><td>{rc(r["rsi14"])}</td>'
+            er+=f'<td>{fn(r["consol_ratio"])}</td><td>{fy(r["yoy_revenue_pct"])}</td><td>{r["inst_consec_days"]}天</td></tr>'
+    else: er='<tr><td colspan="13" style="text-align:center;color:#7c7894;padding:24px">今日無起漲預警</td></tr>'
     # 綜合分表格
     comp_df=full_out[full_out['composite_score']>0].sort_values('composite_score',ascending=False).head(TOP_COMPOSITE).reset_index(drop=True)
     cr=''
     if not comp_df.empty:
-        for i,r in comp_df.iterrows():
-            cr+=f'<tr><td style="text-align:center">{"🏅🎖️⭐✨💫"[i] if i<5 else "▪️"}</td>'
-            cr+=f'<td style="color:#bd8af5;font-weight:700">{r["stock_id"]}</td><td>{r["name"]}</td>'
-            cr+=f'<td>{cb(r["composite_score"])}</td><td>{fn(r["close"],1)}</td><td>{fn(r["vol_ratio"])}x</td>'
-            cr+=f'<td>{pc(r["ma28_bias_pct"])}</td><td>{pc(r["daily_return_pct"])}</td><td>{rc(r["rsi14"])}</td>'
-            cr+=f'<td>{fy(r["yoy_revenue_pct"])}</td><td>{r["inst_consec_days"]}天</td>'
-            cr+=f'<td>{fn(r["early_score"])}</td><td>{fn(r["total_score"])}</td></tr>'
-    else: cr='<tr><td colspan="13" style="text-align:center;color:#8b949e;padding:24px">無綜合分資料</td></tr>'
+        medals=['🏅','🎖️','⭐','✨','💫']
+        for i,(_,r) in enumerate(comp_df.iterrows()):
+            cr+=f'<tr><td style="text-align:center">{medals[i] if i<5 else "▪️"}</td>'
+            cr+=f'<td style="color:#c084fc;font-weight:700">{r["stock_id"]}</td><td style="font-weight:600">{r["name"]}</td>'
+            cr+=f'<td><span class="badge-composite">{fn(r["composite_score"])}</span></td>'
+            cr+=f'<td>{fn(r["close"],1)}</td><td>{fn(r["vol_ratio"])}x</td><td>{pc(r["ma28_bias_pct"])}</td>'
+            cr+=f'<td>{pc(r["daily_return_pct"])}</td><td>{rc(r["rsi14"])}</td><td>{fy(r["yoy_revenue_pct"])}</td>'
+            cr+=f'<td>{r["inst_consec_days"]}天</td><td>{fn(r["early_score"])}</td><td>{fn(r["total_score"])}</td></tr>'
+    else: cr='<tr><td colspan="13" style="text-align:center;color:#7c7894;padding:24px">無綜合分資料</td></tr>'
     top1_id=comp_df.iloc[0]['stock_id'] if not comp_df.empty else '-'
     top1_name=comp_df.iloc[0]['name'] if not comp_df.empty else ''
     top1_score=fn(comp_df.iloc[0]['composite_score']) if not comp_df.empty else '-'
     sch=build_chart_html(s_charts,sdf,'total_score') if s_charts else ''
     ech=build_chart_html(e_charts,edf,'total_ew_score') if e_charts else ''
-    cch=build_chart_html(c_charts,comp_df.assign(rank=range(1,len(comp_df)+1)),'composite_score') if c_charts else ''
+    comp_df2=comp_df.copy()
+    if not comp_df2.empty: comp_df2.insert(0,'rank',range(1,len(comp_df2)+1))
+    cch=build_chart_html(c_charts,comp_df2,'composite_score') if c_charts else ''
+    nodata='<p style="color:#7c7894;text-align:center;padding:20px">無K線圖</p>'
+
     html=f'''<!DOCTYPE html><html lang="zh-TW"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>台股GOGOGO — {TODAY_DISP} 上市選股報告</title>
+<title>台股GOGOGO v3.0 — {TODAY_DISP} 上市選股報告</title>
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap');
-:root{{--bg:#0d1117;--bg2:#161b22;--bg3:#1c2129;--border:#30363d;--gold:#e6a817;--red:#f85149;--green:#3fb950;--purple:#bd8af5;--text:#e6edf3;--text2:#c9d1d9;--text3:#8b949e;}}
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&family=Rajdhani:wght@600;700&display=swap');
+:root{{--bg:#0a0a12;--bg2:#12121e;--bg3:#1a1a2e;--border:#2a2a45;--accent:#c084fc;--accent2:#a855f7;--teal:#2dd4bf;--coral:#fb7185;
+--text:#f0eef6;--text2:#c4c0d4;--text3:#7c7894;--gold:#fbbf24;--green:#34d399;--red:#f87171;--orange:#f97316;--orange2:#ea580c;}}
 *{{box-sizing:border-box;margin:0;padding:0;}}
 body{{background:var(--bg);color:var(--text);font-family:'Noto Sans TC',sans-serif;font-size:15px;line-height:1.65;}}
-.header{{background:linear-gradient(135deg,#0a1628,#1a2744,#0a1628);border-bottom:2px solid var(--gold);padding:36px 48px;}}
-.header-label{{color:var(--gold);font-size:.8em;font-weight:700;letter-spacing:4px;margin-bottom:8px;}}
-.header h1{{font-size:1.85em;font-weight:900;}} .header h1 span{{color:var(--gold);}}
-.header-meta{{margin-top:12px;color:var(--text3);font-size:.88em;}} .header-meta strong{{color:var(--text2);}}
+.header{{background:linear-gradient(135deg,#0f0c1a 0%,#1a1428 30%,#251a18 60%,#1a1020 100%);
+  border-bottom:3px solid var(--orange);padding:44px 48px 36px;position:relative;overflow:hidden;}}
+.header::before{{content:'';position:absolute;top:-40%;right:-5%;width:500px;height:500px;
+  background:radial-gradient(circle,rgba(249,115,22,0.08) 0%,transparent 65%);pointer-events:none;}}
+.header-label{{font-family:'Rajdhani',monospace;color:var(--orange);font-size:.75em;font-weight:700;letter-spacing:5px;margin-bottom:10px;}}
+.header-label::before{{content:'——';margin-right:10px;color:var(--orange2);}}
+.header h1{{font-size:2.2em;font-weight:900;
+  background:linear-gradient(135deg,#f97316 0%,#fb923c 40%,#fbbf24 70%,#f97316 100%);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}}
+.header-meta{{margin-top:16px;color:var(--text3);font-size:.88em;}}
+.header-meta strong{{color:var(--orange);font-weight:700;}}
+.header-badge{{display:inline-block;background:linear-gradient(135deg,var(--orange2),var(--orange));
+  color:#0a0a12;padding:6px 18px;border-radius:20px;font-size:.78em;font-weight:900;margin-right:12px;}}
 .stats-bar{{display:flex;border-bottom:1px solid var(--border);}}
-.stat-item{{flex:1;padding:18px 24px;border-right:1px solid var(--border);background:var(--bg2);}}
-.stat-item:last-child{{border-right:none;}}
-.stat-label{{font-size:.76em;color:var(--text3);letter-spacing:1px;margin-bottom:4px;}}
-.stat-value{{font-size:1.55em;font-weight:900;color:var(--gold);}} .stat-sub{{font-size:.76em;color:var(--text3);margin-top:2px;}}
-.container{{max-width:1440px;margin:0 auto;padding:32px;}}
-.section{{margin-bottom:48px;border:1px solid var(--border);border-radius:12px;overflow:hidden;}}
-.section-header{{padding:20px 28px;display:flex;align-items:center;gap:14px;}}
-.section-header.strong{{background:linear-gradient(90deg,#1a2a4a,#1c2129);border-bottom:1px solid #2d4a7a;}}
-.section-header.early{{background:linear-gradient(90deg,#1a2a1a,#1c2129);border-bottom:1px solid #2d4a2d;}}
-.section-header.composite{{background:linear-gradient(90deg,#2a1a3a,#1c2129);border-bottom:1px solid #5a2d7a;}}
-.section-icon{{font-size:1.6em;}} .section-title-text h2{{font-size:1.2em;font-weight:900;}}
-.section-title-text p{{font-size:.82em;color:var(--text3);margin-top:2px;}}
+.stat-item{{flex:1;padding:22px 28px;border-right:1px solid var(--border);background:linear-gradient(180deg,var(--bg2),var(--bg));transition:background .3s;}}
+.stat-item:hover{{background:var(--bg3);}} .stat-item:last-child{{border-right:none;}}
+.stat-label{{font-family:'Rajdhani',sans-serif;font-size:.72em;color:var(--text3);letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;font-weight:700;}}
+.stat-value{{font-size:1.7em;font-weight:900;color:var(--orange);}} .stat-sub{{font-size:.72em;color:var(--text3);margin-top:3px;}}
+.container{{max-width:1480px;margin:0 auto;padding:36px;}}
+.section{{margin-bottom:52px;border:1px solid var(--border);border-radius:16px;overflow:hidden;background:var(--bg2);box-shadow:0 0 40px rgba(192,132,252,.03);}}
+.section-header{{padding:22px 30px;display:flex;align-items:center;gap:16px;}}
+.section-header.composite{{background:linear-gradient(90deg,#1e1040,#12121e);border-bottom:2px solid var(--accent);}}
+.section-header.early{{background:linear-gradient(90deg,#0a201a,#12121e);border-bottom:2px solid var(--teal);}}
+.section-header.strong{{background:linear-gradient(90deg,#201510,#12121e);border-bottom:2px solid var(--coral);}}
+.section-icon{{font-size:1.8em;}} .section-title h2{{font-size:1.25em;font-weight:900;}}
+.section-title p{{font-size:.8em;color:var(--text3);margin-top:3px;}}
+.chart-link{{margin-left:auto;color:var(--accent);font-size:.85em;font-weight:700;text-decoration:none;padding:8px 18px;
+  border:1px solid rgba(192,132,252,.3);border-radius:10px;background:rgba(192,132,252,.06);transition:all .2s;}}
+.chart-link:hover{{background:rgba(192,132,252,.15);border-color:var(--accent);}}
 .table-wrap{{overflow-x:auto;}}
-table{{width:100%;border-collapse:collapse;font-size:.88em;}}
+table{{width:100%;border-collapse:collapse;font-size:.86em;}}
 thead tr{{background:var(--bg3);border-bottom:1px solid var(--border);}}
-th{{padding:12px 14px;text-align:left;color:var(--text3);font-weight:700;font-size:.8em;white-space:nowrap;}}
-td{{padding:14px 14px;border-bottom:1px solid var(--border);color:var(--text2);vertical-align:top;}}
-tbody tr:hover{{background:rgba(255,255,255,.03);}}
-.charts-grid{{background:var(--bg2);padding:24px;}}
-.chart-wrap{{margin-bottom:28px;border:1px solid var(--border);border-radius:8px;overflow:hidden;background:#0d1117;}}
-.chart-caption{{padding:10px 18px;background:var(--bg3);font-size:.85em;color:var(--text2);font-weight:600;border-bottom:1px solid var(--border);}}
-.legend{{display:flex;gap:16px;flex-wrap:wrap;padding:12px 28px;background:var(--bg3);border-top:1px solid var(--border);font-size:.76em;color:var(--text3);}}
-.footer{{text-align:center;padding:24px;color:var(--text3);font-size:.8em;border-top:1px solid var(--border);}}
-.fixed-nav{{position:fixed;bottom:24px;right:16px;z-index:9999;display:flex;flex-direction:column;gap:6px;}}
-.fixed-nav a{{display:block;text-align:center;padding:11px 10px;background:rgba(13,17,23,.88);color:var(--gold);font-size:15px;font-weight:700;text-decoration:none;border-radius:10px;border:1px solid rgba(230,168,23,.45);letter-spacing:2px;min-width:72px;}}
+th{{padding:13px 15px;text-align:left;color:var(--text3);font-weight:700;font-size:.78em;letter-spacing:.5px;white-space:nowrap;}}
+td{{padding:15px 15px;border-bottom:1px solid rgba(42,42,69,.6);color:var(--text2);}}
+tbody tr{{transition:background .15s;}} tbody tr:hover{{background:rgba(192,132,252,.04);}}
+tbody tr:nth-child(1){{background:rgba(192,132,252,.08);}}
+tbody tr:nth-child(2){{background:rgba(45,212,191,.04);}}
+tbody tr:nth-child(3){{background:rgba(251,113,133,.03);}}
+.badge-score{{background:linear-gradient(135deg,#1a2040,#2d3570);color:#fff;padding:4px 14px;border-radius:20px;font-weight:700;font-size:.95em;display:inline-block;}}
+.badge-composite{{background:linear-gradient(135deg,#3b1870,#6d28d9);color:#fff;padding:4px 14px;border-radius:20px;font-weight:700;box-shadow:0 0 12px rgba(139,92,246,.2);}}
+.charts-grid{{background:var(--bg);padding:28px;}}
+.chart-wrap{{margin-bottom:32px;border:1px solid var(--border);border-radius:12px;overflow:hidden;background:#0a0a12;}}
+.chart-caption{{padding:12px 20px;background:var(--bg3);font-size:.85em;color:var(--text2);font-weight:700;border-bottom:1px solid var(--border);}}
+.legend{{display:flex;gap:18px;flex-wrap:wrap;padding:14px 30px;background:var(--bg3);border-top:1px solid var(--border);font-size:.74em;color:var(--text3);}}
+.dot{{width:10px;height:10px;border-radius:50%;display:inline-block;vertical-align:middle;}}
+.footer{{text-align:center;padding:28px;color:var(--text3);font-size:.78em;border-top:1px solid var(--border);background:var(--bg2);}}
+.fixed-nav{{position:fixed;bottom:28px;right:18px;z-index:9999;display:flex;flex-direction:column;gap:7px;}}
+.fixed-nav a{{display:block;text-align:center;padding:12px 12px;background:rgba(10,10,18,.92);color:var(--accent);font-size:14px;
+  font-weight:700;text-decoration:none;border-radius:12px;border:1px solid rgba(192,132,252,.35);min-width:76px;backdrop-filter:blur(8px);transition:all .2s;letter-spacing:2px;}}
+.fixed-nav a:hover{{background:rgba(192,132,252,.12);border-color:var(--accent);}}
+@keyframes fadeUp{{from{{opacity:0;transform:translateY(24px)}}to{{opacity:1;transform:translateY(0)}}}}
+.section{{animation:fadeUp .6s ease-out both;}} .section:nth-child(2){{animation-delay:.15s;}} .section:nth-child(3){{animation-delay:.3s;}}
 </style></head><body>
 <div class="header">
-<div class="header-label">TSE · 台股GOGOGO · V2.0</div>
-<h1>台股GOGOGO 上市選股報告 — <span>{TODAY_DISP}</span></h1>
-<div class="header-meta">掃描 <strong>{len(price_data)}</strong> 檔上市股 ｜ 強勢確認 <strong>{len(sc_list)}</strong> 檔 ｜ 起漲預警 <strong>{len(ec_list)}</strong> 檔</div>
-</div>
+<div class="header-label">TSE · 台股 GOGOGO · V3.0</div>
+<h1>台股GOGOGO 上市選股報告</h1>
+<div class="header-meta">
+<span class="header-badge">📅 {TODAY_DISP} 收盤分析</span>
+掃描 <strong>{len(price_data)}</strong> 檔上市股 &nbsp; 強勢確認 <strong>{len(sc_list)}</strong> 檔 &nbsp; 起漲預警 <strong>{len(ec_list)}</strong> 檔
+</div></div>
 <div class="stats-bar">
-<div class="stat-item"><div class="stat-label">掃描標的</div><div class="stat-value">{len(price_data)}</div><div class="stat-sub">上市市場</div></div>
-<div class="stat-item"><div class="stat-label">強勢確認股</div><div class="stat-value" style="color:var(--red)">{len(sc_list)}</div><div class="stat-sub">追高吃肉首選</div></div>
-<div class="stat-item"><div class="stat-label">起漲預警股</div><div class="stat-value" style="color:var(--green)">{len(ec_list)}</div><div class="stat-sub">提前布局候選</div></div>
-<div class="stat-item"><div class="stat-label">綜合轉強 TOP1</div><div class="stat-value" style="font-size:1.15em">{top1_id} {top1_name}</div><div class="stat-sub">綜合分 {top1_score}</div></div>
+<div class="stat-item"><div class="stat-label">掃描標的</div><div class="stat-value">{len(price_data)}</div><div class="stat-sub">上市全市場</div></div>
+<div class="stat-item"><div class="stat-label">強勢確認股</div><div class="stat-value" style="color:var(--coral)">{len(sc_list)}</div><div class="stat-sub">追高吃肉首選</div></div>
+<div class="stat-item"><div class="stat-label">起漲預警股</div><div class="stat-value" style="color:var(--teal)">{len(ec_list)}</div><div class="stat-sub">提前布局候選</div></div>
+<div class="stat-item"><div class="stat-label">綜合轉強 TOP1</div><div class="stat-value" style="font-size:1.15em;color:var(--accent)">{top1_id} {top1_name}</div><div class="stat-sub">綜合分 {top1_score}</div></div>
 <div class="stat-item"><div class="stat-label">報告日期</div><div class="stat-value" style="font-size:1.15em">{TODAY_DISP}</div><div class="stat-sub">收盤後自動分析</div></div>
 </div>
 <div class="container">
-<div class="section" id="composite-section"><div class="section-header composite"><div class="section-icon">🔮</div><div class="section-title-text"><h2>綜合轉強潛力股 Top {TOP_COMPOSITE}</h2><p>綜合分 = 起漲分×{COMPOSITE_EARLY_W} + 強勢分×{COMPOSITE_TOTAL_W}</p></div></div>
-<div class="table-wrap"><table><thead><tr><th>排名</th><th>代碼</th><th>名稱</th><th>綜合分</th><th>收盤價</th><th>量比</th><th>MA28乖離</th><th>漲幅%</th><th>RSI14</th><th>營收YoY</th><th>法人連買</th><th>起漲分</th><th>強勢分</th></tr></thead><tbody>{cr}</tbody></table></div></div>
-<div class="section" id="early-section"><div class="section-header early"><div class="section-icon">🌱</div><div class="section-title-text"><h2>即將起漲潛力股 Top {TOP_EARLY}</h2><p>硬條件過濾+財務/籌碼加分排名</p></div></div>
-<div class="table-wrap"><table><thead><tr><th>排名</th><th>代碼</th><th>名稱</th><th>總分</th><th>收盤價</th><th>成交值</th><th>量比</th><th>MA28乖離</th><th>漲幅%</th><th>RSI14</th><th>收斂比</th><th>營收YoY</th><th>法人連買</th></tr></thead><tbody>{er}</tbody></table></div></div>
-<div class="section" id="strong-section"><div class="section-header strong"><div class="section-icon">🔥</div><div class="section-title-text"><h2>強勢確認股 Top {TOP_STRONG}</h2><p>量價齊揚+法人認同+技術突破</p></div></div>
-<div class="table-wrap"><table><thead><tr><th>排名</th><th>代碼</th><th>名稱</th><th>總分</th><th>訊號</th><th>收盤價</th><th>成交值</th><th>量比</th><th>MA28乖離</th><th>漲幅%</th><th>RSI14</th><th>連買天</th><th>強弱</th><th>營收YoY</th></tr></thead><tbody>{sr}</tbody></table></div></div>
-<div class="section" id="composite-charts"><div class="section-header composite"><div class="section-icon">🔮</div><div class="section-title-text"><h2>綜合轉強 K線圖</h2></div></div><div class="charts-grid">{cch or "<p style='color:#8b949e;text-align:center;padding:20px'>無K線圖</p>"}</div></div>
-<div class="section" id="early-charts"><div class="section-header early"><div class="section-icon">🌱</div><div class="section-title-text"><h2>起漲預警 K線圖</h2></div></div><div class="charts-grid">{ech or "<p style='color:#8b949e;text-align:center;padding:20px'>無K線圖</p>"}</div></div>
-<div class="section" id="strong-charts"><div class="section-header strong"><div class="section-icon">🔥</div><div class="section-title-text"><h2>強勢確認 K線圖</h2></div></div><div class="charts-grid">{sch or "<p style='color:#8b949e;text-align:center;padding:20px'>無K線圖</p>"}</div></div>
+<div class="section" id="composite-section"><div class="section-header composite"><div class="section-icon">🔮</div><div class="section-title"><h2>綜合轉強潛力股 Top {TOP_COMPOSITE}</h2><p>綜合分 = 起漲分×{COMPOSITE_EARLY_W} + 強勢分×{COMPOSITE_TOTAL_W}</p></div><a href="#composite-charts" class="chart-link">K線圖 ↓</a></div>
+<div class="table-wrap"><table><thead><tr><th>排名</th><th>代碼</th><th>名稱</th><th>綜合分</th><th>收盤價</th><th>量比</th><th>MA28乖離</th><th>漲幅%</th><th>RSI14</th><th>營收YoY</th><th>法人連買</th><th>起漲分</th><th>強勢分</th></tr></thead><tbody>{cr}</tbody></table></div>
+<div class="legend"><div><span class="dot" style="background:var(--accent)"></span> 綜合分 = early×{COMPOSITE_EARLY_W} + total×{COMPOSITE_TOTAL_W}</div></div></div>
+
+<div class="section" id="early-section"><div class="section-header early"><div class="section-icon">🌱</div><div class="section-title"><h2>即將起漲潛力股 Top {TOP_EARLY}</h2><p>硬條件過濾+加分排名</p></div><a href="#early-charts" class="chart-link">K線圖 ↓</a></div>
+<div class="table-wrap"><table><thead><tr><th>排名</th><th>代碼</th><th>名稱</th><th>總分</th><th>收盤價</th><th>成交值</th><th>量比</th><th>MA28乖離</th><th>漲幅%</th><th>RSI14</th><th>收斂比</th><th>營收YoY</th><th>法人連買</th></tr></thead><tbody>{er}</tbody></table></div>
+<div class="legend"><div><span class="dot" style="background:var(--teal)"></span> YoY>{EW_BONUS_YOY_THRESHOLD:.0f}%→+{EW_BONUS_YOY:.0f} ｜ 法人連買≥2天→+{EW_BONUS_INST:.0f} ｜ 60日<25%→+{EW_BONUS_60D:.0f}</div></div></div>
+
+<div class="section" id="strong-section"><div class="section-header strong"><div class="section-icon">🔥</div><div class="section-title"><h2>強勢確認股 Top {TOP_STRONG}</h2><p>量價齊揚+法人認同+技術突破</p></div><a href="#strong-charts" class="chart-link">K線圖 ↓</a></div>
+<div class="table-wrap"><table><thead><tr><th>排名</th><th>代碼</th><th>名稱</th><th>總分</th><th>訊號</th><th>收盤價</th><th>成交值</th><th>量比</th><th>MA28乖離</th><th>漲幅%</th><th>RSI14</th><th>連買天</th><th>強弱</th><th>營收YoY</th></tr></thead><tbody>{sr}</tbody></table></div>
+<div class="legend"><div><span class="dot" style="background:var(--coral)"></span> 量價子分數×1.1 + 連買天數×{INST_CONSEC_WEIGHT} + Z-score</div><div><span style="color:var(--red)">RSI⚠️</span> ≥78 追高需謹慎</div></div></div>
+
+<div class="section" id="composite-charts"><div class="section-header composite"><div class="section-icon">🔮</div><div class="section-title"><h2>綜合轉強 K線圖</h2></div></div><div class="charts-grid">{cch or nodata}</div></div>
+<div class="section" id="early-charts"><div class="section-header early"><div class="section-icon">🌱</div><div class="section-title"><h2>起漲預警 K線圖</h2></div></div><div class="charts-grid">{ech or nodata}</div></div>
+<div class="section" id="strong-charts"><div class="section-header strong"><div class="section-icon">🔥</div><div class="section-title"><h2>強勢確認 K線圖</h2></div></div><div class="charts-grid">{sch or nodata}</div></div>
 </div>
-<div class="footer">台股GOGOGO 上市專用模型 v2.0 ｜ {TODAY_DISP} ｜ 綜合分：early×{COMPOSITE_EARLY_W}+total×{COMPOSITE_TOTAL_W} ｜ 僅供參考</div>
+<div class="footer">台股GOGOGO v3.0 ｜ {TODAY_DISP} ｜ early×{COMPOSITE_EARLY_W}+total×{COMPOSITE_TOTAL_W} ｜ 量價×1.1 ｜ 僅供參考</div>
 <nav class="fixed-nav"><a href="#composite-section">綜合轉強</a><a href="#early-section">即將起漲</a><a href="#strong-section">強勢確認</a></nav>
 </body></html>'''
     os.makedirs('output',exist_ok=True)
@@ -655,12 +667,10 @@ tbody tr:hover{{background:rgba(255,255,255,.03);}}
     with open(hfn,'w',encoding='utf-8') as f: f.write(html)
     print(f'✅ HTML：{hfn}（{len(html)//1024} KB）'); return hfn
 
-# ════════════════════════════════════════
-# 通知
-# ════════════════════════════════════════
+# ═══ 通知 + main ═══
 def send_telegram(sdf,edf,sc,ec,ns):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: print('⚠️ 無Telegram'); return
-    lines=[f"📊 *台股GOGOGO v2.0 — {TODAY_DISP}*","",f"掃描{ns}檔 強勢{sc} 預警{ec}",""]
+    lines=[f"📊 *台股GOGOGO v3.0 — {TODAY_DISP}*","",f"掃描{ns}檔 強勢{sc} 預警{ec}",""]
     if not sdf.empty:
         lines.append("*🔥 強勢Top5:*")
         for _,r in sdf.head(5).iterrows(): lines.append(f"  #{int(r['rank'])} {r['stock_id']} {r['name']} {r['total_score']:.1f}分")
@@ -678,12 +688,12 @@ def send_telegram(sdf,edf,sc,ec,ns):
 def send_email(csv_fn,html_fn,sdf,edf,sc,ec,ns):
     if not GMAIL_USER or not GMAIL_APP_PASS or not EMAIL_TO: print('⚠️ 無Email'); return
     msg=MIMEMultipart('mixed')
-    msg['Subject']=f'台股GOGOGO {TODAY_DISP} 強勢{sc} 預警{ec}'
+    msg['Subject']=f'台股GOGOGO v3.0 {TODAY_DISP} 強勢{sc} 預警{ec}'
     msg['From']=GMAIL_USER; msg['To']=EMAIL_TO
-    body=f'台股GOGOGO v2.0 {TODAY_DISP}\n掃描{ns}檔 強勢{sc} 預警{ec}'
+    body=f'台股GOGOGO v3.0 {TODAY_DISP}\n掃描{ns}檔 強勢{sc} 預警{ec}'
     if GITHUB_PAGES_URL: body+=f'\n報告：{GITHUB_PAGES_URL}'
     msg.attach(MIMEText(body,'plain','utf-8'))
-    for fpath in [csv_fn, html_fn]:
+    for fpath in [csv_fn,html_fn]:
         if fpath and os.path.exists(fpath):
             with open(fpath,'rb') as f:
                 part=MIMEBase('application','octet-stream'); part.set_payload(f.read())
@@ -696,11 +706,8 @@ def send_email(csv_fn,html_fn,sdf,edf,sc,ec,ns):
         print('✅ Email已發送（CSV+HTML）')
     except Exception as e: print(f'⚠️Email:{e}')
 
-# ════════════════════════════════════════
-# main
-# ════════════════════════════════════════
 def main():
-    print("="*60); print("台股GOGOGO 上市專用模型 v2.0"); print("="*60)
+    print("="*60); print("台股GOGOGO 上市專用模型 v3.0"); print("="*60)
     font_path,font_prop=init_chinese_font()
     all_ids,nm=load_stock_list()
     fids=twse_prefilter(all_ids,nm)
@@ -713,20 +720,19 @@ def main():
     sdf,sc=run_strong_filter(pd_,inst,fin,nm)
     edf,ec=run_early_filter(pd_,inst,fin,nm)
     csv_fn,full=export_csv(pd_,inst,fin,nm,sdf,edf)
-    # K線圖
     print('\n[K線圖] 繪製中...')
     s_charts,e_charts,c_charts={},{},{}
     if not sdf.empty:
         for sid in sdf['stock_id'].head(TOP_CHART).tolist():
-            b=draw_kline(sid,pd_,nm,font_path,'強勢確認')
+            b=draw_kline(sid,pd_,nm,font_path,'強勢確認');
             if b: s_charts[sid]=b
     if not edf.empty:
         for sid in edf['stock_id'].head(TOP_CHART).tolist():
-            b=draw_kline(sid,pd_,nm,font_path,'起漲預警')
+            b=draw_kline(sid,pd_,nm,font_path,'起漲預警');
             if b: e_charts[sid]=b
     comp_top=full[full['composite_score']>0].sort_values('composite_score',ascending=False).head(TOP_CHART)
     for sid in comp_top['stock_id'].tolist():
-        b=draw_kline(sid,pd_,nm,font_path,'綜合轉強')
+        b=draw_kline(sid,pd_,nm,font_path,'綜合轉強');
         if b: c_charts[sid]=b
     print(f'  強勢{len(s_charts)} 預警{len(e_charts)} 綜合{len(c_charts)}')
     html_fn=export_html(pd_,inst,fin,nm,sdf,edf,sc,ec,s_charts,e_charts,c_charts,full)

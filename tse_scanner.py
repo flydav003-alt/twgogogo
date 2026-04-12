@@ -552,8 +552,8 @@ def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts
             yr=fin.get(r['stock_id'],None)
             sr+=f'<tr><td style="text-align:center">{m}</td>'
             # ★ 改這裡：代碼欄位改為 Yahoo 連結（紅色）
-            sr+=f'<td>{yahoo_link(r["stock_id"], "#fb7185")}</td>'
-            sr+=f'<td style="font-weight:600">{r["name"]}</td>'
+            sr+=f'<td style="font-size:1.5em">{yahoo_link(r["stock_id"], "#fb7185")}</td>'
+            sr+=f'<td style="font-weight:600;font-size:1.5em">{r["name"]}</td>'
             sr+=f'<td><span class="badge-score" style="background:linear-gradient(135deg,#3a1520,#6b2535)">{fn(r["total_score"])}</span></td>'
             sr+=f'<td style="font-size:.82em">{r.get("signal_b","")}<br><span style="color:#7c7894">{r.get("signal_c","")}</span></td>'
             sr+=f'<td style="font-weight:600">{fn(r["close"],1)}</td><td>{ft(r["turnover_today"])}</td><td>{fn(r["vol_ratio"])}x</td>'
@@ -568,8 +568,8 @@ def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts
             rk=int(r['rank']); m=['🌱','🌿','🍃'][rk-1] if rk<=3 else f'#{rk}'
             er+=f'<tr><td style="text-align:center">{m}</td>'
             # ★ 改這裡：代碼欄位改為 Yahoo 連結（青色）
-            er+=f'<td>{yahoo_link(r["stock_id"], "#2dd4bf")}</td>'
-            er+=f'<td>{r["name"]}</td>'
+            er+=f'<td style="font-size:1.5em">{yahoo_link(r["stock_id"], "#2dd4bf")}</td>'
+            er+=f'<td style="font-size:1.5em">{r["name"]}</td>'
             er+=f'<td><span class="badge-score" style="background:linear-gradient(135deg,#0a2520,#1a5545)">{fn(r["total_ew_score"])}</span></td>'
             er+=f'<td>{fn(r["close"],1)}</td><td>{ft(r["turnover_today"])}</td><td>{fn(r["vol_ratio"])}x</td>'
             er+=f'<td>{pc(r["ma28_bias"])}</td><td>{pc(r["daily_return_pct"])}</td><td>{rc(r["rsi14"])}</td>'
@@ -584,8 +584,8 @@ def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts
         for i,(_,r) in enumerate(comp_df.iterrows()):
             cr+=f'<tr><td style="text-align:center">{medals[i] if i<5 else "▪️"}</td>'
             # ★ 改這裡：代碼欄位改為 Yahoo 連結（紫色）
-            cr+=f'<td>{yahoo_link(r["stock_id"], "#c084fc")}</td>'
-            cr+=f'<td style="font-weight:600">{r["name"]}</td>'
+            cr+=f'<td style="font-size:1.5em">{yahoo_link(r["stock_id"], "#c084fc")}</td>'
+            cr+=f'<td style="font-weight:600;font-size:1.5em">{r["name"]}</td>'
             cr+=f'<td><span class="badge-composite">{fn(r["composite_score"])}</span></td>'
             cr+=f'<td>{fn(r["close"],1)}</td><td>{fn(r["vol_ratio"])}x</td><td>{pc(r["ma28_bias_pct"])}</td>'
             cr+=f'<td>{pc(r["daily_return_pct"])}</td><td>{rc(r["rsi14"])}</td><td>{fy(r["yoy_revenue_pct"])}</td>'

@@ -605,8 +605,23 @@ def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts
     #   代碼 | 名稱(⭐) | 收盤價 | 漲幅% | 量比 | RSI14 | MA28乖離 | 營收YoY | 法人連買
     # 強勢確認區額外多一欄：訊號
 
-    COMMON_TH = '''<th>代碼</th><th>名稱</th><th>收盤價</th><th>漲幅%</th>
-                   <th>量比</th><th>RSI14</th><th>MA28乖離</th><th>營收YoY</th><th>法人連買</th>'''
+    COMMON_TH = '<th>排名</th><th>代碼</th><th>名稱</th><th>收盤價</th><th>漲幅%</th><th>量比</th><th>RSI14</th><th>MA28乖離</th><th>營收YoY</th><th>法人連買</th>'
+
+    # 每檔股票上方都插入的欄位標題列
+    INLINE_TH = (
+        '<tr style="background:#1a1a2e;border-top:2px solid #2a2a45;">'
+        '<th style="padding:6px 15px;font-size:.72em;color:#7c7894;font-weight:700;letter-spacing:.5px;white-space:nowrap;">排名</th>'
+        '<th style="padding:6px 15px;font-size:.72em;color:#7c7894;font-weight:700;letter-spacing:.5px;white-space:nowrap;">代碼</th>'
+        '<th style="padding:6px 15px;font-size:.72em;color:#7c7894;font-weight:700;letter-spacing:.5px;white-space:nowrap;">名稱</th>'
+        '<th style="padding:6px 15px;font-size:.72em;color:#7c7894;font-weight:700;letter-spacing:.5px;white-space:nowrap;">收盤價</th>'
+        '<th style="padding:6px 15px;font-size:.72em;color:#7c7894;font-weight:700;letter-spacing:.5px;white-space:nowrap;">漲幅%</th>'
+        '<th style="padding:6px 15px;font-size:.72em;color:#7c7894;font-weight:700;letter-spacing:.5px;white-space:nowrap;">量比</th>'
+        '<th style="padding:6px 15px;font-size:.72em;color:#7c7894;font-weight:700;letter-spacing:.5px;white-space:nowrap;">RSI14</th>'
+        '<th style="padding:6px 15px;font-size:.72em;color:#7c7894;font-weight:700;letter-spacing:.5px;white-space:nowrap;">MA28乖離</th>'
+        '<th style="padding:6px 15px;font-size:.72em;color:#7c7894;font-weight:700;letter-spacing:.5px;white-space:nowrap;">營收YoY</th>'
+        '<th style="padding:6px 15px;font-size:.72em;color:#7c7894;font-weight:700;letter-spacing:.5px;white-space:nowrap;">法人連買</th>'
+        '</tr>'
+    )
 
     def row_inline_chart(sid, charts):
         """若有 K 線圖 base64，直接以 colspan 行內嵌入。"""
@@ -641,6 +656,7 @@ def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts
             name_cell = r['name'] + (' ⭐' if star else '')
             yr   = fin.get(sid, None)
             ic   = int(r.get('inst_consec_days', 0))
+            cr += INLINE_TH
             cr += (
                 f'<tr>'
                 f'<td style="text-align:center">{medals_c[i] if i<5 else "▪️"}</td>'
@@ -669,6 +685,7 @@ def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts
             m    = medals_e[rk-1] if rk <= 3 else f'#{rk}'
             star = check_star(r)
             name_cell = r['name'] + (' ⭐' if star else '')
+            er += INLINE_TH
             er += (
                 f'<tr>'
                 f'<td style="text-align:center">{m}</td>'
@@ -710,6 +727,7 @@ def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts
             })
             name_cell = r['name'] + (' ⭐' if star else '')
             yr = fin.get(sid, None)
+            sr += INLINE_TH
             sr += (
                 f'<tr>'
                 f'<td style="text-align:center">{m}</td>'

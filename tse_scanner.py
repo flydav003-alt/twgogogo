@@ -841,7 +841,6 @@ tbody tr:nth-child(odd of .data-row){{background:rgba(26,26,46,.4);}}
   </div>
   <div class="table-wrap">
     <table>
-      <thead><tr>{TH_COMMON}</tr></thead>
       <tbody>{cr}</tbody>
     </table>
   </div>
@@ -863,7 +862,6 @@ tbody tr:nth-child(odd of .data-row){{background:rgba(26,26,46,.4);}}
   </div>
   <div class="table-wrap">
     <table>
-      <thead><tr>{TH_COMMON}</tr></thead>
       <tbody>{er}</tbody>
     </table>
   </div>
@@ -885,7 +883,6 @@ tbody tr:nth-child(odd of .data-row){{background:rgba(26,26,46,.4);}}
   </div>
   <div class="table-wrap">
     <table>
-      <thead><tr>{TH_COMMON}</tr></thead>
       <tbody>{sr}</tbody>
     </table>
   </div>

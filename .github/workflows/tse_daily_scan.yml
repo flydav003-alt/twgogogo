@@ -67,3 +67,17 @@ jobs:
           git diff --cached --quiet || git commit -m "Update: 上市選股報告 $(date +'%Y-%m-%d')"
           git pull --rebase origin main
           git push
+
+      - name: 推送CSV到stock-database
+        env:
+          REPO_C_TOKEN: ${{ secrets.REPO_C_TOKEN }}
+        run: |
+          git clone https://x-access-token:${REPO_C_TOKEN}@github.com/flydav003-alt/stock-database.git repo_c
+          mkdir -p repo_c/data
+          cp output/tse_*.csv repo_c/data/
+          cd repo_c
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --staged --quiet || git commit -m "新增 TSE $(date '+%Y%m%d') CSV"
+          git push

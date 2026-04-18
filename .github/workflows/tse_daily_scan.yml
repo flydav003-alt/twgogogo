@@ -1,7 +1,7 @@
 name: 上市選股系統 v2.0 每日自動執行
 on:
   schedule:
-    - cron: '49 06 * * 1-5'
+    - cron: '38 07 * * 1-5'
   workflow_dispatch:
 jobs:
   run-scanner:

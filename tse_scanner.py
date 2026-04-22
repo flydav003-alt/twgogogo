@@ -5,12 +5,13 @@
 Phase 0: TWSE OpenAPI pre-filter（≥2.5億）
 Phase 1: FinMind Token1 → 股價+營收
 Phase 2: TWSE T86 → 籌碼（免Token）
-輸出: Twgogogo_YYYYMMDD.csv + TSE_report_YYYYMMDD.html
+輸出: tse_YYYYMMDD.csv + TSE_report_YYYYMMDD.html
 
-HTML v3.1 修改：
+HTML v3.2 修改：
+- 新增快速瀏覽摘要區（對齊OTC版本）：三個摘要列 + chip 可點擊跳錨點
 - 綜合轉強 Top 15、即將起漲 Top 15、強勢確認 Top 10
-- 欄位順序：收盤價→漲幅%→量比→RSI14→MA28乖離→營收YoY→法人連買（移除分數欄）
-- K線圖直接顯示於每檔下方（不需點開）
+- 欄位順序：收盤價→漲幅%→量比→RSI14→MA28乖離→營收YoY→法人連買
+- K線圖直接顯示於每檔下方（每個個股有錨點ID）
 - ⭐ 星星自動標示（符合精選條件）
 """
 import subprocess,sys,os,time,warnings,json,smtplib,base64,io
@@ -352,7 +353,6 @@ def run_strong_filter(pd_,inst,fin,nm):
             'strength':'強' if sc>18 else('中' if sc>=12 else '弱'),
             '_vr':last['vol_ratio'],'_mb':mb,'_ic':float(ic*INST_CONSEC_WEIGHT),'_dp':dp,'_h20':h20,
             'turnover_億':round((last.get('turnover',0) or 0)/1e8,2)})
-    # 保底：確保每筆都有 total_score（空清單或單筆都安全）
     for c in cands:
         c.setdefault('total_score', c['score'])
     if len(cands)>=2:
@@ -464,7 +464,7 @@ def export_csv(pd_,inst,fin,nm,sdf,edf):
     for sid,df in pd_.items():
         if df is None or df.empty: continue
         is_s=sid in ss; is_e=sid in es
-        if not is_s and not is_e: continue  # 只匯出入選股
+        if not is_s and not is_e: continue
         last=df.iloc[-1].to_dict(); vm5=last.get('vol_ma5',0) or 0; cl=last.get('close',0)
         m28=last.get('MA28',0) or 0; vr=(last.get('volume',0)/vm5) if vm5>0 else 0
         dp=last.get('daily_return',0)*100; mb=((cl-m28)/m28*100) if m28>0 else 0
@@ -496,20 +496,6 @@ def export_csv(pd_,inst,fin,nm,sdf,edf):
 
 # ═══ 星星條件判斷 ═══
 def check_star(row):
-    """
-    精選條件：同時符合以下條件顯示 ⭐
-    - is_early_breakout == True
-    - 2.7 <= daily_return_pct <= 6.0
-    - inst_consec_days >= 2  （強勢用 inst_consec，起漲/綜合用 inst_consec_days）
-    - foreign_3d > 0
-    - trust_3d >= 0
-    - trust_today > 0
-    - vol_ratio >= 1.5
-    - 6.0 <= ma28_bias_pct <= 12.0
-    - 52 <= rsi14 <= 64
-    - yoy_revenue_pct > 5
-    - turnover_億 >= 2.0
-    """
     try:
         is_early = row.get('is_early_breakout', False)
         if not is_early:
@@ -543,22 +529,12 @@ def check_star(row):
         return False
 
 
-# ═══ HTML 報告（暗紫科技 + 橘金標題）v3.1 ═══
-# 版面改動：
-#   1. 欄位順序：收盤價→漲幅%→量比→RSI14→MA28乖離→營收YoY→法人連買（移除分數欄）
-#   2. K線圖直接顯示於每檔下方（不需點開）
-#   3. ⭐ 星星自動標示（check_star 條件）
-#   4. 綜合轉強 Top 15、即將起漲 Top 15、強勢確認 Top 10（各自附 K 線圖）
-
+# ═══ HTML 報告 v3.2（加入快速瀏覽摘要區，對齊OTC版本）═══
 def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts,c_charts,full_out):
 
     def fn(v,d=2):
         try: return f'{float(v):,.{d}f}'
         except: return str(v)
-
-    def ft(v):
-        try: return f'{float(v)/1e8:.2f} 億'
-        except: return '-'
 
     def pc(v):
         try:
@@ -585,10 +561,6 @@ def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts
             return f'<span style="color:#fb7185">{f:.0f}%</span>'
         except: return '<span style="color:#7c7894">-</span>'
 
-    def sb(v):
-        c={'強':'#fb7185','中':'#c084fc','弱':'#7c7894'}.get(v,'#7c7894')
-        return f'<span style="background:{c};color:#fff;padding:2px 10px;border-radius:12px;font-weight:700">{v}</span>'
-
     def yahoo_link(code, color):
         url = f'https://tw.stock.yahoo.com/quote/{code}.TW'
         return (
@@ -605,14 +577,7 @@ def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts
             f'</svg></a>'
         )
 
-    # ── 共用：資料列 + 直接顯示的 K 線圖 ──────────────────────────────────
-    # 欄位順序（所有三個區塊統一）：
-    #   代碼 | 名稱(⭐) | 收盤價 | 漲幅% | 量比 | RSI14 | MA28乖離 | 營收YoY | 法人連買
-    # 強勢確認區額外多一欄：訊號
-
-    COMMON_TH = '<th>排名</th><th>代碼</th><th>名稱</th><th>收盤價</th><th>漲幅%</th><th>量比</th><th>RSI14</th><th>MA28乖離</th><th>營收YoY</th><th>法人連買</th>'
-
-    # 每檔股票上方都插入的欄位標題列
+    # ── 每檔前方的欄位標題列 ──
     INLINE_TH = (
         '<tr style="background:#1a1a2e;border-top:2px solid #2a2a45;">'
         '<th style="padding:6px 15px;font-size:.72em;color:#7c7894;font-weight:700;letter-spacing:.5px;white-space:nowrap;">排名</th>'
@@ -628,20 +593,21 @@ def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts
         '</tr>'
     )
 
-    def row_inline_chart(sid, charts):
-        """若有 K 線圖 base64，直接以 colspan 行內嵌入。"""
+    # ── K線圖列（帶錨點ID）──
+    def row_inline_chart(sid, charts, section_prefix=''):
         b64 = charts.get(sid)
         if not b64:
             return ''
+        anchor_id = f'{section_prefix}-{sid}' if section_prefix else sid
         return (
-            f'<tr style="background:#0a0a12;">'
+            f'<tr id="{anchor_id}" style="background:#0a0a12;">'
             f'<td colspan="10" style="padding:6px 16px 10px;">'
             f'<img src="data:image/png;base64,{b64}" '
             f'style="width:100%;max-width:1200px;border-radius:6px;display:block;"/>'
             f'</td></tr>'
         )
 
-    # ── 綜合轉強表格 ──────────────────────────────────────────────────────
+    # ── 綜合轉強 ──
     comp_df = (
         full_out[full_out['composite_score'] > 0]
         .sort_values('composite_score', ascending=False)
@@ -652,8 +618,8 @@ def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts
     comp_df2 = comp_df2.drop(columns=['rank'], errors='ignore')
     comp_df2.insert(0, 'rank', range(1, len(comp_df2) + 1))
 
-    cr = ''
     medals_c = ['🏅','🎖️','⭐','✨','💫']
+    cr = ''
     if not comp_df2.empty:
         for i, (_, r) in enumerate(comp_df2.iterrows()):
             sid  = r['stock_id']
@@ -669,18 +635,18 @@ def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts
                 f'<td style="font-weight:600">{name_cell}</td>'
                 f'<td style="font-weight:600">{fn(r["close"],1)}</td>'
                 f'<td>{pc(r["daily_return_pct"])}</td>'
-                f'<td class="val-vr">{fn(r["vol_ratio"])}x</td>'
+                f'<td>{fn(r["vol_ratio"])}x</td>'
                 f'<td>{rc(r["rsi14"])}</td>'
                 f'<td>{pc(r["ma28_bias_pct"])}</td>'
                 f'<td>{fy(yr)}</td>'
                 f'<td>{ic}天</td>'
                 f'</tr>'
             )
-            cr += row_inline_chart(sid, c_charts)
+            cr += row_inline_chart(sid, c_charts, 'comp')
     else:
         cr = '<tr><td colspan="10" style="text-align:center;color:#7c7894;padding:24px">無綜合分資料</td></tr>'
 
-    # ── 起漲預警表格 ──────────────────────────────────────────────────────
+    # ── 起漲預警 ──
     medals_e = ['🌱','🌿','🍃']
     er = ''
     if not edf.empty:
@@ -705,20 +671,21 @@ def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts
                 f'<td>{r["inst_consec_days"]}天</td>'
                 f'</tr>'
             )
-            er += row_inline_chart(sid, e_charts)
+            er += row_inline_chart(sid, e_charts, 'early')
     else:
         er = '<tr><td colspan="10" style="text-align:center;color:#7c7894;padding:24px">今日無起漲預警</td></tr>'
 
-    # ── 強勢確認表格 ──────────────────────────────────────────────────────
+    # ── 強勢確認 ──
     medals_s = ['🥇','🥈','🥉']
     sr = ''
+    early_ids_set = set(edf['stock_id'].tolist()) if not edf.empty else set()
     if not sdf.empty:
         for _, r in sdf.head(TOP_STRONG).iterrows():
             sid  = r['stock_id']
             rk   = int(r['rank'])
             m    = medals_s[rk-1] if rk <= 3 else f'#{rk}'
             star = check_star({
-                'is_early_breakout': r['stock_id'] in (edf['stock_id'].tolist() if not edf.empty else []),
+                'is_early_breakout': sid in early_ids_set,
                 'daily_return_pct':  r.get('daily_return_pct', 0),
                 'inst_consec_days':  r.get('inst_consec', 0),
                 'foreign_3d':        r.get('foreign_3d', 0),
@@ -747,16 +714,58 @@ def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts
                 f'<td>{r["inst_consec"]}天</td>'
                 f'</tr>'
             )
-            sr += row_inline_chart(sid, s_charts)
+            sr += row_inline_chart(sid, s_charts, 'strong')
     else:
         sr = '<tr><td colspan="10" style="text-align:center;color:#7c7894;padding:24px">今日無符合條件個股</td></tr>'
 
-    top1_id    = comp_df2.iloc[0]['stock_id']   if not comp_df2.empty else '-'
-    top1_name  = comp_df2.iloc[0]['name']        if not comp_df2.empty else ''
+    top1_id    = comp_df2.iloc[0]['stock_id']        if not comp_df2.empty else '-'
+    top1_name  = comp_df2.iloc[0]['name']             if not comp_df2.empty else ''
     top1_score = fn(comp_df2.iloc[0]['composite_score']) if not comp_df2.empty else '-'
 
-    # ── 共用 TH 字串（含訊號欄給強勢用） ─────────────────────────────────
-    TH_COMMON  = '<th>排名</th><th>代碼</th><th>名稱</th><th>收盤價</th><th>漲幅%</th><th>量比</th><th>RSI14</th><th>MA28乖離</th><th>營收YoY</th><th>法人連買</th>'
+    # ── 快速瀏覽摘要 chip 產生器 ──
+    def make_chip(sid, name, anchor_id, is_star):
+        star_class = ' st' if is_star else ''
+        return (
+            f'<a class="chip{star_class}" href="#{anchor_id}">'
+            f'<span class="cd">{sid}</span>'
+            f'<span class="nm">{name}</span>'
+            f'</a>'
+        )
+
+    comp_chips = ''
+    for _, r in comp_df2.iterrows():
+        sid    = r['stock_id']
+        star   = check_star(r)
+        anchor = f'comp-{sid}' if sid in c_charts else 'composite-section'
+        comp_chips += make_chip(sid, r['name'], anchor, star)
+
+    early_chips = ''
+    if not edf.empty:
+        for _, r in edf.head(TOP_EARLY).iterrows():
+            sid    = r['stock_id']
+            star   = check_star(r)
+            anchor = f'early-{sid}' if sid in e_charts else 'early-section'
+            early_chips += make_chip(sid, r['name'], anchor, star)
+
+    strong_chips = ''
+    if not sdf.empty:
+        for _, r in sdf.head(TOP_STRONG).iterrows():
+            sid  = r['stock_id']
+            star = check_star({
+                'is_early_breakout': sid in early_ids_set,
+                'daily_return_pct':  r.get('daily_return_pct', 0),
+                'inst_consec_days':  r.get('inst_consec', 0),
+                'foreign_3d':        r.get('foreign_3d', 0),
+                'trust_3d':          r.get('trust_3d', 0),
+                'trust_today':       r.get('trust_today', 0),
+                'vol_ratio':         r.get('vol_ratio', 0),
+                'ma28_bias':         r.get('ma28_bias', 0),
+                'rsi14':             r.get('rsi14', 0),
+                'yoy_revenue_pct':   fin.get(sid, None),
+                'turnover_億':       r.get('turnover_億', 0),
+            })
+            anchor = f'strong-{sid}' if sid in s_charts else 'strong-section'
+            strong_chips += make_chip(sid, r['name'], anchor, star)
 
     html = f'''<!DOCTYPE html><html lang="zh-TW"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>台股GOGOGO v3.0 — {TODAY_DISP} 上市選股報告</title>
@@ -800,7 +809,6 @@ thead tr{{background:var(--bg3);border-bottom:1px solid var(--border);}}
 th{{padding:13px 15px;text-align:left;color:var(--text3);font-weight:700;font-size:.78em;letter-spacing:.5px;white-space:nowrap;}}
 td{{padding:13px 15px;border-bottom:1px solid rgba(42,42,69,.4);color:var(--text2);vertical-align:middle;}}
 tbody tr:hover{{background:rgba(192,132,252,.04);}}
-tbody tr:nth-child(odd of .data-row){{background:rgba(26,26,46,.4);}}
 .legend{{display:flex;gap:18px;flex-wrap:wrap;padding:14px 30px;background:var(--bg3);border-top:1px solid var(--border);font-size:.74em;color:var(--text3);}}
 .dot{{width:10px;height:10px;border-radius:50%;display:inline-block;vertical-align:middle;}}
 .footer{{text-align:center;padding:28px;color:var(--text3);font-size:.78em;border-top:1px solid var(--border);background:var(--bg2);}}
@@ -812,6 +820,31 @@ tbody tr:nth-child(odd of .data-row){{background:rgba(26,26,46,.4);}}
 .section{{animation:fadeUp .6s ease-out both;}}
 .section:nth-child(2){{animation-delay:.15s;}}
 .section:nth-child(3){{animation-delay:.3s;}}
+
+/* ── 快速瀏覽摘要區 ── */
+.summary-wrap{{max-width:1480px;margin:0 auto;padding:24px 36px 8px;}}
+.ss{{margin-bottom:12px;border:1px solid var(--border);border-radius:14px;overflow:hidden;background:var(--bg2);}}
+.sh{{display:flex;align-items:center;gap:10px;padding:10px 18px;background:var(--bg3);}}
+.sh .ttl{{font-size:13.5px;font-weight:700;color:var(--text);}}
+.sh .bdg{{font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;white-space:nowrap;}}
+.sh .sub{{font-size:11px;color:var(--text3);margin-left:auto;}}
+.cg{{padding:10px 16px 12px;display:flex;flex-wrap:wrap;gap:7px;}}
+.chip{{display:inline-flex;flex-direction:column;align-items:center;gap:1px;padding:6px 12px;
+  border-radius:10px;border:1px solid var(--border);color:var(--text2);
+  background:var(--bg);white-space:nowrap;text-decoration:none;transition:opacity .15s;min-width:56px;}}
+.chip:hover{{opacity:.65;}}
+.chip .cd{{font-weight:700;font-size:13px;line-height:1.2;}}
+.chip .nm{{color:var(--text3);font-size:11px;line-height:1.2;}}
+.chip.st .cd{{color:var(--gold);}}
+.chip.st{{border-color:rgba(251,191,36,.4);background:rgba(251,191,36,.08);}}
+.s-comp .sh{{border-left:4px solid var(--accent);}}
+.s-early .sh{{border-left:4px solid var(--teal);}}
+.s-strong .sh{{border-left:4px solid var(--coral);}}
+.bdg-c{{background:rgba(192,132,252,.15);color:var(--accent);}}
+.bdg-e{{background:rgba(45,212,191,.12);color:var(--teal);}}
+.bdg-s{{background:rgba(251,113,133,.12);color:var(--coral);}}
+.sum-legend{{font-size:11px;color:var(--text3);padding:0 4px 10px;display:flex;align-items:center;gap:6px;}}
+.sum-dot{{width:7px;height:7px;border-radius:50%;background:var(--gold);display:inline-block;opacity:.8;}}
 </style></head><body>
 
 <div class="header">
@@ -833,6 +866,46 @@ tbody tr:nth-child(odd of .data-row){{background:rgba(26,26,46,.4);}}
   <div class="stat-item"><div class="stat-label">報告日期</div><div class="stat-value" style="font-size:1.15em">{TODAY_DISP}</div><div class="stat-sub">收盤後自動分析</div></div>
 </div>
 
+<!-- ══ 快速瀏覽摘要區 ══ -->
+<div class="summary-wrap">
+
+  <div class="ss s-comp">
+    <div class="sh">
+      <span style="width:8px;height:8px;border-radius:50%;background:var(--accent);display:inline-block;flex-shrink:0;"></span>
+      <span class="ttl">綜合轉強潛力股</span>
+      <span class="bdg bdg-c">Top {TOP_COMPOSITE}</span>
+      <span class="sub">↓ 點擊跳至個股K線</span>
+    </div>
+    <div class="cg">{comp_chips}</div>
+  </div>
+
+  <div class="ss s-early">
+    <div class="sh">
+      <span style="width:8px;height:8px;border-radius:50%;background:var(--teal);display:inline-block;flex-shrink:0;"></span>
+      <span class="ttl">即將起漲潛力股</span>
+      <span class="bdg bdg-e">Top {TOP_EARLY}</span>
+      <span class="sub">↓ 點擊跳至個股K線</span>
+    </div>
+    <div class="cg">{early_chips}</div>
+  </div>
+
+  <div class="ss s-strong">
+    <div class="sh">
+      <span style="width:8px;height:8px;border-radius:50%;background:var(--coral);display:inline-block;flex-shrink:0;"></span>
+      <span class="ttl">強勢確認股</span>
+      <span class="bdg bdg-s">Top {TOP_STRONG}</span>
+      <span class="sub">↓ 點擊跳至個股K線</span>
+    </div>
+    <div class="cg">{strong_chips}</div>
+  </div>
+
+  <div class="sum-legend">
+    <span class="sum-dot"></span>
+    金色底 = ⭐ 精選條件全符合 ｜ 點擊標籤跳至對應個股K線
+  </div>
+
+</div>
+
 <div class="container">
 
 <!-- ═══ 綜合轉強 ═══ -->
@@ -845,9 +918,7 @@ tbody tr:nth-child(odd of .data-row){{background:rgba(26,26,46,.4);}}
     </div>
   </div>
   <div class="table-wrap">
-    <table>
-      <tbody>{cr}</tbody>
-    </table>
+    <table><thead></thead><tbody>{cr}</tbody></table>
   </div>
   <div class="legend">
     <div><span class="dot" style="background:var(--accent)"></span> 綜合分 = early×{COMPOSITE_EARLY_W} + total×{COMPOSITE_TOTAL_W}</div>
@@ -866,12 +937,10 @@ tbody tr:nth-child(odd of .data-row){{background:rgba(26,26,46,.4);}}
     </div>
   </div>
   <div class="table-wrap">
-    <table>
-      <tbody>{er}</tbody>
-    </table>
+    <table><thead></thead><tbody>{er}</tbody></table>
   </div>
   <div class="legend">
-    <div><span class="dot" style="background:var(--teal)"></span> YoY>{EW_BONUS_YOY_THRESHOLD:.0f}%→+{EW_BONUS_YOY:.0f} ｜ 法人連買≥2→+{EW_BONUS_INST:.0f} ｜ 60日<25%→+{EW_BONUS_60D:.0f}</div>
+    <div><span class="dot" style="background:var(--teal)"></span> YoY>{EW_BONUS_YOY_THRESHOLD:.0f}%→+{EW_BONUS_YOY:.0f} ｜ 法人連買≥2→+{EW_BONUS_INST:.0f} ｜ 60日&lt;25%→+{EW_BONUS_60D:.0f}</div>
     <div style="color:var(--teal)">↗ 點擊代碼開 Yahoo 股市</div>
     <div>⭐ = 精選條件全符合</div>
   </div>
@@ -887,9 +956,7 @@ tbody tr:nth-child(odd of .data-row){{background:rgba(26,26,46,.4);}}
     </div>
   </div>
   <div class="table-wrap">
-    <table>
-      <tbody>{sr}</tbody>
-    </table>
+    <table><thead></thead><tbody>{sr}</tbody></table>
   </div>
   <div class="legend">
     <div><span class="dot" style="background:var(--coral)"></span> 量價子分數×1.1 + 連買天數×{INST_CONSEC_WEIGHT} + Z-score</div>
@@ -948,7 +1015,7 @@ def send_email(csv_fn,html_fn,sdf,edf,sc,ec,ns):
     body=f'台股GOGOGO v3.0 {TODAY_DISP}\n掃描{ns}檔 強勢{sc} 預警{ec}'
     if GITHUB_PAGES_URL: body+=f'\n報告：{GITHUB_PAGES_URL}'
     msg.attach(MIMEText(body,'plain','utf-8'))
-    for fpath in [csv_fn]:  # 只附加CSV，HTML請至GitHub Pages查看
+    for fpath in [csv_fn]:
         if fpath and os.path.exists(fpath):
             with open(fpath,'rb') as f:
                 part=MIMEBase('application','octet-stream'); part.set_payload(f.read())
@@ -958,7 +1025,7 @@ def send_email(csv_fn,html_fn,sdf,edf,sc,ec,ns):
     try:
         with smtplib.SMTP_SSL('smtp.gmail.com',465) as s:
             s.login(GMAIL_USER,GMAIL_APP_PASS); s.sendmail(GMAIL_USER,EMAIL_TO.split(','),msg.as_string())
-        print('✅ Email已發送（CSV+HTML）')
+        print('✅ Email已發送')
     except Exception as e: print(f'⚠️Email:{e}')
 
 
@@ -966,7 +1033,7 @@ def send_email(csv_fn,html_fn,sdf,edf,sc,ec,ns):
 def main():
     print("="*60)
     print("台股GOGOGO 上市專用模型 v3.0")
-    print("HTML v3.1：三區顯示 | K線直顯 | ⭐精選標示")
+    print("HTML v3.2：快速瀏覽摘要 + K線錨點跳轉")
     print("="*60)
     font_path, font_prop = init_chinese_font()
     all_ids, nm = load_stock_list()
@@ -984,19 +1051,16 @@ def main():
     print('\n[K線圖] 繪製中...')
     s_charts, e_charts, c_charts = {}, {}, {}
 
-    # 強勢確認 K線：Top 10
     if not sdf.empty:
         for sid in sdf['stock_id'].head(TOP_STRONG).tolist():
             b = draw_kline(sid, pd_, nm, font_path, '強勢確認')
             if b: s_charts[sid] = b
 
-    # 起漲預警 K線：Top 15
     if not edf.empty:
         for sid in edf['stock_id'].head(TOP_EARLY).tolist():
             b = draw_kline(sid, pd_, nm, font_path, '起漲預警')
             if b: e_charts[sid] = b
 
-    # 綜合轉強 K線：Top 15
     comp_top = (
         full[full['composite_score'] > 0]
         .sort_values('composite_score', ascending=False)
@@ -1017,7 +1081,7 @@ def main():
     send_email(csv_fn, html_fn, sdf, edf, len(sc), len(ec), ns)
 
     print("\n" + "="*60)
-    print(f"✅ Twgogogo_{TODAY_STR}.csv 已產生")
+    print(f"✅ tse_{TODAY_STR}.csv 已產生")
     print(f"✅ TSE_report_{TODAY_STR}.html 已產生")
     print("="*60)
 

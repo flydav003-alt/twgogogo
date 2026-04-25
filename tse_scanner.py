@@ -577,6 +577,20 @@ def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts
             f'</svg></a>'
         )
 
+
+    def kline_link(code, name):
+          KLINE_BASE = "https://flydav003-alt.github.io/k-line/"
+          url = f'{KLINE_BASE}?stock={code}'
+          return (
+                 f'{name}'
+                 f'<a href="{url}" target="_blank" rel="noopener" '
+                 f'style="color:#e6a817;font-size:0.78em;font-weight:700;'
+                 f'text-decoration:none;margin-left:6px;white-space:nowrap;" '
+                 f'onmouseover="this.style.opacity=\'0.75\'" '
+                 f'onmouseout="this.style.opacity=\'1\'">'
+                 f'分析↗</a>'
+           )
+
     # ── 每檔前方的欄位標題列 ──
     INLINE_TH = (
         '<tr style="background:#1a1a2e;border-top:2px solid #2a2a45;">'
@@ -632,7 +646,7 @@ def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts
                 f'<tr>'
                 f'<td style="text-align:center">{medals_c[i] if i<5 else "▪️"}</td>'
                 f'<td>{yahoo_link(sid, "#c084fc")}</td>'
-                f'<td style="font-weight:600">{name_cell}</td>'
+                f'<td style="font-weight:600">{kline_link(sid, name_cell)}</td>'
                 f'<td style="font-weight:600">{fn(r["close"],1)}</td>'
                 f'<td>{pc(r["daily_return_pct"])}</td>'
                 f'<td>{fn(r["vol_ratio"])}x</td>'
@@ -661,7 +675,7 @@ def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts
                 f'<tr>'
                 f'<td style="text-align:center">{m}</td>'
                 f'<td>{yahoo_link(sid, "#2dd4bf")}</td>'
-                f'<td>{name_cell}</td>'
+                f'<td>{kline_link(sid, name_cell)}</td>'
                 f'<td>{fn(r["close"],1)}</td>'
                 f'<td>{pc(r["daily_return_pct"])}</td>'
                 f'<td>{fn(r["vol_ratio"])}x</td>'
@@ -704,7 +718,7 @@ def export_html(price_data,inst,fin,nm,sdf,edf,sc_list,ec_list,s_charts,e_charts
                 f'<tr>'
                 f'<td style="text-align:center">{m}</td>'
                 f'<td>{yahoo_link(sid, "#fb7185")}</td>'
-                f'<td style="font-weight:600">{name_cell}</td>'
+                f'<td style="font-weight:600">{kline_link(sid, name_cell)}</td>'
                 f'<td style="font-weight:600">{fn(r["close"],1)}</td>'
                 f'<td>{pc(r["daily_return_pct"])}</td>'
                 f'<td>{fn(r["vol_ratio"])}x</td>'
